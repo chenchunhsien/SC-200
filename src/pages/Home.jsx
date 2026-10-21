@@ -3,7 +3,6 @@ import {
   BookOpen,
   CheckCircle2,
   ClipboardList,
-  Cloud,
   Database,
   Dices,
   HardDrive,
@@ -11,10 +10,8 @@ import {
   Upload,
   GraduationCap,
   Layers,
-  Loader2,
   ListOrdered,
   Play,
-  RefreshCw,
   RotateCcw,
   Shuffle,
   Star,
@@ -24,12 +21,12 @@ import {
 } from 'lucide-react'
 import { qKey, useStore } from '../lib/store'
 import { shuffle } from '../lib/grading'
-import { correctUnits, countQuestions, loadDriveLink, questionUnits } from '../lib/customBank'
+import { correctUnits, countQuestions, questionUnits } from '../lib/customBank'
 import { drawMockExam, parseNumberRanges, pickByNumbers } from '../lib/mockExam'
 
 const MOCK_SIZES = [50, 100]
 
-export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImport, onImportDrive, onClearCustom }) {
+export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImport, onClearCustom }) {
   const { history, mistakes, starred, progress, resetBank } = useStore()
   const [mode, setMode] = useState('practice')
   const [shuffled, setShuffled] = useState(false)
@@ -98,7 +95,7 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
 
   return (
     <div className="space-y-8">
-      {sourceInfo && <SourceBanner info={sourceInfo} onImport={onImport} onImportDrive={onImportDrive} onClear={onClearCustom} />}
+      {sourceInfo && <SourceBanner info={sourceInfo} onImport={onImport} onClear={onClearCustom} />}
       <section className="rounded-2xl bg-gradient-to-br from-blue-700 via-blue-600 to-indigo-600 p-6 text-white shadow-lg sm:p-8">
         <p className="text-sm font-medium text-blue-100">Microsoft Security Operations Analyst</p>
         <h1 className="mt-1 text-2xl font-bold sm:text-3xl">{bank.title}</h1>
@@ -334,111 +331,43 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
   )
 }
 
-function SourceBanner({ info, onImport, onImportDrive, onClear }) {
+function SourceBanner({ info, onImport, onClear }) {
   return (
     <section
-      className={`space-y-3 rounded-xl border px-4 py-3 text-sm ${
+      className={`flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 text-sm ${
         info.isCustom ? 'border-violet-200 bg-violet-50 text-violet-900' : 'border-slate-200 bg-white text-slate-700'
       }`}
     >
-      <div className="flex flex-wrap items-center gap-3">
-        {info.isCustom ? <HardDrive className="h-5 w-5 shrink-0" /> : <Database className="h-5 w-5 shrink-0" />}
-        <div className="min-w-0 flex-1">
-          <span className="font-semibold">
-            目前使用：{info.isCustom ? `自訂題庫（共 ${info.count} 題）` : `預設範例（共 ${info.count} 題）`}
-          </span>
-          <span className="ml-2 opacity-75">
-            {info.isCustom
-              ? `${info.fileName ?? ''}${info.savedAt ? ` · 匯入於 ${new Date(info.savedAt).toLocaleString()}` : ''} · 僅存在此瀏覽器`
-              : '可匯入你自己的題庫 JSON，題目只會存在此瀏覽器、不會上傳'}
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onImport}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 font-semibold text-white hover:bg-blue-700"
-        >
-          <Upload className="h-4 w-4" />
-          {info.isCustom ? '重新匯入本機 JSON' : '上傳本機 JSON'}
-        </button>
-        {info.isCustom && (
-          <button
-            type="button"
-            onClick={onClear}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 font-medium text-rose-600 hover:bg-rose-50"
-          >
-            <Trash2 className="h-4 w-4" />
-            清除本機題庫
-          </button>
-        )}
+      {info.isCustom ? <HardDrive className="h-5 w-5 shrink-0" /> : <Database className="h-5 w-5 shrink-0" />}
+      <div className="min-w-0 flex-1">
+        <span className="font-semibold">
+          目前使用：{info.isCustom ? `自訂題庫（共 ${info.count} 題）` : `預設範例（共 ${info.count} 題）`}
+        </span>
+        <span className="ml-2 opacity-75">
+          {info.isCustom
+            ? `${info.fileName ?? ''}${info.savedAt ? ` · 匯入於 ${new Date(info.savedAt).toLocaleString()}` : ''} · 僅存在此瀏覽器`
+            : '可匯入你自己的題庫 JSON，題目只會存在此瀏覽器、不會上傳'}
+        </span>
       </div>
-      <DriveImport onImportDrive={onImportDrive} />
-    </section>
-  )
-}
-
-/** 從公開共用的 Google 雲端硬碟連結載入題庫；成功的連結記在 localStorage，下次可一鍵重新整理 */
-function DriveImport({ onImportDrive }) {
-  const [savedLink, setSavedLink] = useState(loadDriveLink)
-  const [link, setLink] = useState(savedLink)
-  const [loading, setLoading] = useState(false)
-
-  const load = async (target) => {
-    if (!target.trim() || loading) return
-    setLoading(true)
-    const ok = await onImportDrive(target)
-    setLoading(false)
-    if (ok) setSavedLink(target.trim())
-  }
-
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault()
-        load(link)
-      }}
-      className="flex flex-wrap items-center gap-2 border-t border-current/10 pt-3"
-    >
-      <Cloud className="h-5 w-5 shrink-0" />
-      <label htmlFor="drive-link" className="font-medium">
-        從 Google 雲端連結載入
-      </label>
-      <input
-        id="drive-link"
-        type="url"
-        value={link}
-        onChange={(e) => setLink(e.target.value)}
-        disabled={loading}
-        placeholder="https://drive.google.com/file/d/FILE_ID/view?usp=sharing"
-        className="min-w-0 flex-1 basis-64 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-slate-800 disabled:bg-slate-50"
-      />
       <button
-        type="submit"
-        disabled={loading || !link.trim()}
-        className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 font-semibold text-white hover:bg-blue-700 disabled:bg-slate-300"
+        type="button"
+        onClick={onImport}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 font-semibold text-white hover:bg-blue-700"
       >
-        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cloud className="h-4 w-4" />}
-        {loading ? '載入中…' : '載入題庫'}
+        <Upload className="h-4 w-4" />
+        {info.isCustom ? '重新匯入' : '匯入個人題庫 (Upload JSON)'}
       </button>
-      {savedLink && (
+      {info.isCustom && (
         <button
           type="button"
-          onClick={() => {
-            setLink(savedLink)
-            load(savedLink)
-          }}
-          disabled={loading}
-          title={savedLink}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-white px-3 py-1.5 font-medium text-blue-700 hover:bg-blue-50 disabled:text-slate-300"
+          onClick={onClear}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 font-medium text-rose-600 hover:bg-rose-50"
         >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          重新整理雲端題庫
+          <Trash2 className="h-4 w-4" />
+          清除本機題庫
         </button>
       )}
-      <p className="basis-full text-xs opacity-75">
-        檔案需設為「知道連結的任何人」都能檢視。注意：取得連結的人都能下載題庫，請自行評估是否適合公開。
-      </p>
-    </form>
+    </section>
   )
 }
 
