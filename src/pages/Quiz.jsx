@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Clock, Flag, Send, Star } from 'lucide-react'
 import QuestionView from '../components/QuestionView'
 import SourceLabel from '../components/SourceLabel'
-import { gradeQuestion, isAnswered, isTouched } from '../lib/grading'
+import { gradeQuestion, isAnswered, isTouched, summarizeResult } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
 import { numberQuestions, questionUnits } from '../lib/customBank'
 
@@ -13,9 +13,9 @@ export const formatTime = (sec) => {
 }
 
 export default function Quiz({ bank, config, onFinish }) {
-  const { questions, mode, title, source } = config
+  const { questions, mode, title, source, round, origin } = config
   const practice = mode === 'practice'
-  const { starred, toggleStar, recordAttempt } = useStore()
+  const { starred, toggleStar, recordAttempt, addExamRecord } = useStore()
   const [idx, setIdx] = useState(0)
   const [answers, setAnswers] = useState({})
   const [revealed, setRevealed] = useState({})
@@ -31,7 +31,8 @@ export default function Quiz({ bank, config, onFinish }) {
   }, [])
 
   const q = questions[idx]
-  const recordOpts = { clearMistakeOnCorrect: source === 'mistakes' }
+  // 錯題重練與錯題循環重測中答對的題目會移出錯題本
+  const recordOpts = { clearMistakeOnCorrect: source === 'mistakes' || source === 'cycle' }
 
   const record = (question, answer) => {
     if (recorded.current.has(question.id)) return
@@ -61,7 +62,18 @@ export default function Quiz({ bank, config, onFinish }) {
     const msg = unanswered ? `尚有 ${unanswered} 題未完成作答，確定要交卷嗎？` : '確定要交卷嗎？'
     if (!window.confirm(msg)) return
     questions.forEach((x) => record(x, answers[x.id]))
-    onFinish({ title, mode, questions, answers, elapsed, source })
+    const { totalCount, correctCount, scorePercent, scaledScore } = summarizeResult(questions, answers)
+    addExamRecord({
+      bankId: bank.id,
+      modeName: title,
+      mode,
+      totalCount,
+      correctCount,
+      scorePercent,
+      scaledScore,
+      duration: elapsed,
+    })
+    onFinish({ title, mode, questions, answers, elapsed, source, round, origin })
   }
 
   const statusTone = (x, i) => {

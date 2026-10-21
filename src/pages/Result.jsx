@@ -1,33 +1,40 @@
 import { useMemo, useState } from 'react'
-import { Award, CheckCircle2, ChevronDown, Home, RotateCcw, Star, XCircle } from 'lucide-react'
+import { Award, CheckCircle2, ChevronDown, Home, PartyPopper, Star, XCircle } from 'lucide-react'
 import QuestionView from '../components/QuestionView'
-import { correctUnitsOf, gradeQuestion, previewText, TYPE_LABELS } from '../lib/grading'
+import { previewText, summarizeResult, TYPE_LABELS } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
-import { numberQuestions } from '../lib/customBank'
+import { numberQuestions, questionUnits } from '../lib/customBank'
 import SourceLabel from '../components/SourceLabel'
 import { formatTime } from './Quiz'
 
 const PASS_SCORE = 700
 
 export default function Result({ bank, result, onRetry, onHome }) {
-  const { questions, answers, elapsed, title, mode } = result
+  const { questions, answers, elapsed, title, mode, source, round = 0, origin = title } = result
   const { starred, toggleStar } = useStore()
   const [filter, setFilter] = useState('all')
   const [open, setOpen] = useState(null)
 
-  const graded = useMemo(
-    () => questions.map((q) => ({ q, grade: gradeQuestion(q, answers[q.id]) })),
-    [questions, answers],
-  )
-  const earned = graded.reduce((s, g) => s + g.grade.earned, 0)
-  const total = graded.reduce((s, g) => s + g.grade.total, 0)
-  const correctCount = graded.filter((g) => g.grade.correct).length
-  // 答對題數與題號以子題計，與首頁、作答頁一致
+  const summary = useMemo(() => summarizeResult(questions, answers), [questions, answers])
+  const { graded, earned, points, wrong, scaledScore: scaled } = summary
+  const correctCount = graded.length - wrong.length
+  // 題號以子題計，與首頁、作答頁一致
   const numbering = numberQuestions(questions)
-  const correctUnits = graded.reduce((n, g) => n + correctUnitsOf(g.q, g.grade), 0)
-  const scaled = total ? Math.round((earned / total) * 1000) : 0
   const passed = scaled >= PASS_SCORE
-  const wrong = graded.filter((g) => !g.grade.correct).map((g) => g.q)
+
+  // 錯題循環重測：只帶入答錯的題目（題組整組保留），一輪輪重測直到全部答對
+  const inCycle = source === 'cycle'
+  const cleared = inCycle && !wrong.length
+  const wrongUnits = wrong.reduce((n, q) => n + questionUnits(q), 0)
+  const startCycle = () =>
+    onRetry({
+      title: `${origin}・錯題循環重測 第 ${round + 1} 輪`,
+      questions: wrong,
+      mode,
+      source: 'cycle',
+      round: round + 1,
+      origin,
+    })
 
   const shown = graded.filter((g) =>
     filter === 'all' ? true : filter === 'wrong' ? !g.grade.correct : g.grade.correct,
@@ -35,6 +42,23 @@ export default function Result({ bank, result, onRetry, onHome }) {
 
   return (
     <div className="space-y-6">
+      {cleared && (
+        <section className="flex flex-wrap items-center gap-4 rounded-2xl border-2 border-emerald-300 bg-emerald-50 p-6 text-emerald-900 shadow-sm">
+          <PartyPopper className="h-12 w-12 shrink-0 text-emerald-600" />
+          <div className="min-w-0 flex-1">
+            <h2 className="text-xl font-bold">🎉 恭喜！本輪錯題已全數克服！</h2>
+            <p className="mt-1 text-emerald-800">經過 {round} 輪錯題循環重測，「{origin}」的錯題已經全部答對。</p>
+          </div>
+          <button
+            type="button"
+            onClick={onHome}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-5 py-2.5 font-semibold text-white hover:bg-emerald-700"
+          >
+            <Home className="h-4 w-4" />
+            返回首頁
+          </button>
+        </section>
+      )}
       <section
         className={`rounded-2xl p-6 text-white shadow-lg sm:p-8 ${
           passed ? 'bg-gradient-to-br from-emerald-600 to-teal-600' : 'bg-gradient-to-br from-rose-600 to-orange-500'
@@ -45,6 +69,9 @@ export default function Result({ bank, result, onRetry, onHome }) {
           <div className="flex-1">
             <p className="text-sm opacity-80">
               {title} · {mode === 'exam' ? '考試模式' : '練習模式'}
+              {inCycle && (
+                <span className="ml-2 rounded-full bg-white/20 px-2 py-0.5 text-xs font-semibold">第 {round} 輪</span>
+              )}
             </p>
             <div className="mt-1 flex items-baseline gap-2">
               <span className="text-5xl font-extrabold">{scaled}</span>
@@ -55,8 +82,8 @@ export default function Result({ bank, result, onRetry, onHome }) {
             </div>
           </div>
           <dl className="grid grid-cols-3 gap-4 text-center">
-            <Metric label="答對題數" value={`${correctUnits} / ${numbering.total}`} />
-            <Metric label="得分點" value={`${earned} / ${total}`} />
+            <Metric label="答對題數" value={`${summary.correctCount} / ${summary.totalCount}`} />
+            <Metric label="得分點" value={`${earned} / ${points}`} />
             <Metric label="用時" value={formatTime(elapsed)} />
           </dl>
         </div>
@@ -71,15 +98,15 @@ export default function Result({ bank, result, onRetry, onHome }) {
           <Home className="h-4 w-4" />
           回首頁
         </button>
-        <button
-          type="button"
-          disabled={!wrong.length}
-          onClick={() => onRetry({ title: `${title}－錯題重做`, questions: wrong, mode: 'practice', source: 'retry' })}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white hover:bg-blue-700 disabled:bg-slate-300"
-        >
-          <RotateCcw className="h-4 w-4" />
-          重做答錯的 {wrong.length} 題
-        </button>
+        {wrong.length > 0 && (
+          <button
+            type="button"
+            onClick={startCycle}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white hover:bg-blue-700"
+          >
+            🔁 錯題循環重測（剩餘 {wrongUnits} 題）
+          </button>
+        )}
         <div className="ml-auto inline-flex rounded-lg bg-slate-200 p-1 text-sm">
           {[
             ['all', `全部 ${graded.length}`],

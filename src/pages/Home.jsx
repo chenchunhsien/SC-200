@@ -20,6 +20,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { qKey, useStore } from '../lib/store'
+import { formatTime } from './Quiz'
 import { shuffle } from '../lib/grading'
 import { correctUnits, countQuestions, questionUnits } from '../lib/customBank'
 import { drawMockExam, parseNumberRanges, pickByNumbers } from '../lib/mockExam'
@@ -27,7 +28,7 @@ import { drawMockExam, parseNumberRanges, pickByNumbers } from '../lib/mockExam'
 const MOCK_SIZES = [50, 100]
 
 export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImport, onClearCustom }) {
-  const { history, mistakes, starred, progress, resetBank } = useStore()
+  const { history, mistakes, starred, progress, examHistory, resetBank, clearExamHistory } = useStore()
   const [mode, setMode] = useState('practice')
   const [shuffled, setShuffled] = useState(false)
   const [customCount, setCustomCount] = useState('10')
@@ -314,6 +315,13 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
         </div>
       </section>
 
+      <ExamHistory
+        records={examHistory.filter((r) => r.bankId === bank.id)}
+        onClear={() => {
+          if (window.confirm('確定要清空此題庫的歷次測驗紀錄嗎？作答統計與錯題本不受影響。')) clearExamHistory(bank.id)
+        }}
+      />
+
       <div className="flex justify-end">
         <button
           type="button"
@@ -366,6 +374,90 @@ function SourceBanner({ info, onImport, onClear }) {
           <Trash2 className="h-4 w-4" />
           清除本機題庫
         </button>
+      )}
+    </section>
+  )
+}
+
+const HISTORY_PREVIEW = 10
+const PASS_PERCENT = 70
+
+/** 歷次測驗紀錄，新的在前；預設只顯示最近 HISTORY_PREVIEW 筆 */
+function ExamHistory({ records, onClear }) {
+  const [expanded, setExpanded] = useState(false)
+  const shown = expanded ? records : records.slice(0, HISTORY_PREVIEW)
+
+  return (
+    <section>
+      <div className="mb-3 flex items-center gap-3">
+        <h2 className="text-lg font-bold text-slate-900">📊 歷次測驗歷史紀錄</h2>
+        {records.length > 0 && <span className="text-sm text-slate-600">共 {records.length} 筆</span>}
+        {records.length > 0 && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 hover:border-rose-200 hover:text-rose-600"
+          >
+            <Trash2 className="h-4 w-4" />
+            清空歷史紀錄
+          </button>
+        )}
+      </div>
+      {records.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm text-slate-500">
+          尚無測驗紀錄，交卷後會自動記錄在這裡。
+        </p>
+      ) : (
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+          <ul className="divide-y divide-slate-100">
+            {shown.map((r) => {
+              const passed = r.scorePercent >= PASS_PERCENT
+              return (
+                <li key={r.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3">
+                  <span className="w-36 shrink-0 text-sm text-slate-600">
+                    {new Date(r.timestamp).toLocaleString(undefined, {
+                      month: '2-digit',
+                      day: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                  <span className="min-w-0 flex-1 basis-48 truncate font-medium text-slate-900" title={r.modeName}>
+                    {r.modeName}
+                  </span>
+                  <span
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      r.mode === 'exam' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    {r.mode === 'exam' ? '考試' : '練習'}
+                  </span>
+                  <span className="w-20 shrink-0 text-right text-sm text-slate-700">
+                    {r.correctCount} / {r.totalCount}
+                  </span>
+                  <span
+                    className={`w-14 shrink-0 text-right font-bold ${passed ? 'text-emerald-600' : 'text-rose-600'}`}
+                  >
+                    {r.scorePercent}%
+                  </span>
+                  <span className="inline-flex w-20 shrink-0 items-center justify-end gap-1 font-mono text-sm text-slate-600">
+                    <Timer className="h-3.5 w-3.5" />
+                    {formatTime(r.duration)}
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+          {records.length > HISTORY_PREVIEW && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="w-full border-t border-slate-100 py-2 text-sm font-medium text-blue-700 hover:bg-slate-50"
+            >
+              {expanded ? '收合' : `顯示全部 ${records.length} 筆`}
+            </button>
+          )}
+        </div>
       )}
     </section>
   )

@@ -5,20 +5,23 @@ const KEYS = {
   mistakes: 'sc200.mistakes', // { [key]: { bankId, qid, wrongCount, addedAt } }
   starred: 'sc200.starred', // { [key]: { bankId, qid, at } }
   progress: 'sc200.progress', // { [bankId]: { [chapterId]: [qid, ...] } }
+  examHistory: 'sc200.examHistory', // [{ id, bankId, timestamp, modeName, mode, totalCount, correctCount, scorePercent, scaledScore, duration }]，新的在前
 }
+
+const EXAM_HISTORY_LIMIT = 200
 
 export const qKey = (bankId, qid) => `${bankId}::${qid}`
 
-function read(key) {
+function read(key, fallback) {
   try {
-    return JSON.parse(localStorage.getItem(key)) ?? {}
+    return JSON.parse(localStorage.getItem(key)) ?? fallback
   } catch {
-    return {}
+    return fallback
   }
 }
 
-function usePersisted(key) {
-  const [value, setValue] = useState(() => read(key))
+function usePersisted(key, fallback = {}) {
+  const [value, setValue] = useState(() => read(key, fallback))
   useEffect(() => {
     try {
       localStorage.setItem(key, JSON.stringify(value))
@@ -36,6 +39,7 @@ export function StoreProvider({ children }) {
   const [mistakes, setMistakes] = usePersisted(KEYS.mistakes)
   const [starred, setStarred] = usePersisted(KEYS.starred)
   const [progress, setProgress] = usePersisted(KEYS.progress)
+  const [examHistory, setExamHistory] = usePersisted(KEYS.examHistory, [])
 
   const recordAttempt = useCallback(
     (bankId, q, answer, grade, { clearMistakeOnCorrect = false } = {}) => {
@@ -111,13 +115,52 @@ export function StoreProvider({ children }) {
       setMistakes(strip)
       setStarred(strip)
       setProgress(({ [bankId]: _, ...rest }) => rest)
+      setExamHistory((list) => list.filter((r) => r.bankId !== bankId))
     },
-    [setHistory, setMistakes, setStarred, setProgress],
+    [setHistory, setMistakes, setStarred, setProgress, setExamHistory],
+  )
+
+  // 每次交卷寫入一筆測驗紀錄，只保留最近 EXAM_HISTORY_LIMIT 筆
+  const addExamRecord = useCallback(
+    (record) => {
+      const now = Date.now()
+      setExamHistory((list) => [{ id: `h_${now}`, timestamp: now, ...record }, ...list].slice(0, EXAM_HISTORY_LIMIT))
+    },
+    [setExamHistory],
+  )
+
+  const clearExamHistory = useCallback(
+    (bankId) => setExamHistory((list) => list.filter((r) => r.bankId !== bankId)),
+    [setExamHistory],
   )
 
   const value = useMemo(
-    () => ({ history, mistakes, starred, progress, recordAttempt, toggleStar, removeMistake, resetBank }),
-    [history, mistakes, starred, progress, recordAttempt, toggleStar, removeMistake, resetBank],
+    () => ({
+      history,
+      mistakes,
+      starred,
+      progress,
+      examHistory,
+      recordAttempt,
+      toggleStar,
+      removeMistake,
+      resetBank,
+      addExamRecord,
+      clearExamHistory,
+    }),
+    [
+      history,
+      mistakes,
+      starred,
+      progress,
+      examHistory,
+      recordAttempt,
+      toggleStar,
+      removeMistake,
+      resetBank,
+      addExamRecord,
+      clearExamHistory,
+    ],
   )
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
 }

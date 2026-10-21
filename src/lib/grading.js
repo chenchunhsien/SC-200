@@ -78,6 +78,34 @@ export function correctUnitsOf(q, grade) {
   return q.questions.filter((s) => grade.detail[s.id]?.correct).length
 }
 
+/**
+ * 彙總一次測驗的成績，結算頁與歷史紀錄共用。
+ * correctCount / totalCount 以子題計；scaledScore 為含部分給分的 /1000 分數；wrong 為未全對的頂層題目
+ */
+export function summarizeResult(questions, answers) {
+  const graded = questions.map((q) => ({ q, grade: gradeQuestion(q, answers[q.id]) }))
+  let earned = 0
+  let points = 0
+  let correctCount = 0
+  let totalCount = 0
+  for (const { q, grade } of graded) {
+    earned += grade.earned
+    points += grade.total
+    correctCount += correctUnitsOf(q, grade)
+    totalCount += q.type === 'case_study' ? q.questions.length : 1
+  }
+  return {
+    graded,
+    earned,
+    points,
+    correctCount,
+    totalCount,
+    scorePercent: totalCount ? Math.round((correctCount / totalCount) * 100) : 0,
+    scaledScore: points ? Math.round((earned / points) * 1000) : 0,
+    wrong: graded.filter((g) => !g.grade.correct).map((g) => g.q),
+  }
+}
+
 /** 是否已完整作答 */
 export function isAnswered(q, ans) {
   if (ans == null) return false
