@@ -84,7 +84,7 @@ export default function Quiz({ bank, config, onFinish }) {
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-bold text-slate-900">{title}</h1>
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-slate-600">
             {practice ? '練習模式' : '考試模式'} · 已作答 {answeredCount} / {numbering.total}
           </p>
         </div>
@@ -110,7 +110,7 @@ export default function Quiz({ bank, config, onFinish }) {
               <div className="text-sm font-semibold text-blue-700">
                 第 {numbering.labels[idx]} / {numbering.total} 題
               </div>
-              {q.chapter && <div className="text-xs text-slate-500">{chapterTitle[q.chapter] ?? q.chapter}</div>}
+              {q.chapter && <div className="text-xs text-slate-600">{chapterTitle[q.chapter] ?? q.chapter}</div>}
               {q.source && <SourceLabel source={q.source} />}
             </div>
             <button
@@ -119,7 +119,7 @@ export default function Quiz({ bank, config, onFinish }) {
               className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-sm transition ${
                 isStar
                   ? 'border-amber-300 bg-amber-50 text-amber-700'
-                  : 'border-slate-200 text-slate-500 hover:bg-slate-50'
+                  : 'border-slate-200 text-slate-600 hover:bg-slate-50'
               }`}
             >
               <Star className={`h-4 w-4 ${isStar ? 'fill-amber-400 text-amber-500' : ''}`} />
@@ -180,14 +180,14 @@ export default function Quiz({ bank, config, onFinish }) {
                 className={`relative flex aspect-square items-center justify-center rounded-lg border text-sm font-semibold transition ${statusTone(x, i)}`}
               >
                 {numbering.starts[i]}
-                {questionUnits(x) > 1 && <span className="text-[10px] font-normal opacity-75">+</span>}
+                {questionUnits(x) > 1 && <span className="text-xs font-normal opacity-75">+</span>}
                 {starred[qKey(bank.id, x.id)] && (
                   <Star className="absolute -right-1 -top-1 h-3 w-3 fill-amber-400 text-amber-500" />
                 )}
               </button>
             ))}
           </div>
-          <ul className="mt-4 space-y-1.5 text-xs text-slate-500">
+          <ul className="mt-4 space-y-1.5 text-xs text-slate-600">
             <Legend className="bg-blue-500">已作答</Legend>
             {practice && <Legend className="bg-emerald-500">答對</Legend>}
             {practice && <Legend className="bg-rose-500">答錯</Legend>}

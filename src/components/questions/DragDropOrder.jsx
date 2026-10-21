@@ -75,8 +75,8 @@ export default function DragDropOrder({ q, answer, onChange, revealed, grade }) 
                   revealed ? 'opacity-60' : 'cursor-grab active:cursor-grabbing'
                 }`}
               >
-                <GripVertical className="h-4 w-4 shrink-0 text-slate-400" />
-                <span className="flex-1 text-sm">{it.text}</span>
+                <GripVertical className="h-4 w-4 shrink-0 text-slate-500" />
+                <span className="flex-1 text-base leading-[1.65]">{it.text}</span>
                 {!revealed && (
                   <button
                     type="button"
@@ -90,7 +90,7 @@ export default function DragDropOrder({ q, answer, onChange, revealed, grade }) 
                 )}
               </li>
             ))}
-            {pool.length === 0 && <li className="py-4 text-center text-sm text-slate-400">（已無可選項目）</li>}
+            {pool.length === 0 && <li className="py-4 text-center text-sm text-slate-500">（已無可選項目）</li>}
           </ul>
         </section>
 
@@ -130,7 +130,7 @@ export default function DragDropOrder({ q, answer, onChange, revealed, grade }) 
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
                     {i + 1}
                   </span>
-                  <span className="flex-1 text-sm">{byId[id]?.text}</span>
+                  <span className="flex-1 text-base leading-[1.65]">{byId[id]?.text}</span>
                   {!revealed && (
                     <span className="flex shrink-0 items-center">
                       <IconBtn onClick={() => move(i, -1)} disabled={i === 0} title="上移">
@@ -150,9 +150,9 @@ export default function DragDropOrder({ q, answer, onChange, revealed, grade }) 
             {Array.from({ length: Math.max(0, q.answer.length - order.length) }).map((_, i) => (
               <li
                 key={`empty-${i}`}
-                className="flex items-center gap-2 rounded-lg border-2 border-dashed border-slate-200 px-3 py-2 text-sm text-slate-400"
+                className="flex items-center gap-2 rounded-lg border-2 border-dashed border-slate-200 px-3 py-2 text-sm text-slate-500"
               >
-                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-500">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-600">
                   {order.length + i + 1}
                 </span>
                 拖曳或點擊 + 加入步驟
@@ -182,7 +182,7 @@ function IconBtn({ children, danger, ...props }) {
       type="button"
       {...props}
       className={`rounded-md p-1 disabled:text-slate-300 disabled:hover:bg-transparent ${
-        danger ? 'text-rose-500 hover:bg-rose-50' : 'text-slate-500 hover:bg-slate-100'
+        danger ? 'text-rose-500 hover:bg-rose-50' : 'text-slate-600 hover:bg-slate-100'
       }`}
     >
       {children}

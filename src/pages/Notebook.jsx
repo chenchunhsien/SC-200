@@ -38,7 +38,7 @@ export default function Notebook({ bank, onStart, initialTab = 'mistakes' }) {
       </div>
 
       {isMistakes && (
-        <p className="text-sm text-slate-500">答錯的題目會自動加入錯題本；在「錯題重練」中答對即自動移出。</p>
+        <p className="text-sm text-slate-600">答錯的題目會自動加入錯題本；在「錯題重練」中答對即自動移出。</p>
       )}
 
       <ul className="space-y-3">
@@ -52,12 +52,12 @@ export default function Notebook({ bank, onStart, initialTab = 'mistakes' }) {
                   <span className="rounded bg-blue-100 px-1.5 py-0.5 font-semibold text-blue-700">
                     {TYPE_LABELS[q.type]}
                   </span>
-                  <span className="text-slate-500">{chapterTitle[q.chapter]}</span>
+                  <span className="text-slate-600">{chapterTitle[q.chapter]}</span>
                   {isMistakes && (
                     <span className="text-rose-600">錯 {mistakes[key].wrongCount} 次</span>
                   )}
                   {h && (
-                    <span className="text-slate-400">
+                    <span className="text-slate-500">
                       作答 {h.attempts} 次 · 答對 {h.correctCount} 次
                     </span>
                   )}
@@ -76,7 +76,7 @@ export default function Notebook({ bank, onStart, initialTab = 'mistakes' }) {
                 type="button"
                 onClick={() => (isMistakes ? removeMistake(bank.id, q.id) : toggleStar(bank.id, q.id))}
                 title={isMistakes ? '移出錯題本' : '取消收藏'}
-                className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                className="shrink-0 rounded-lg p-2 text-slate-500 hover:bg-rose-50 hover:text-rose-600"
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -84,7 +84,7 @@ export default function Notebook({ bank, onStart, initialTab = 'mistakes' }) {
           )
         })}
         {!list.length && (
-          <li className="rounded-xl border-2 border-dashed border-slate-200 py-16 text-center text-slate-400">
+          <li className="rounded-xl border-2 border-dashed border-slate-200 py-16 text-center text-slate-500">
             {isMistakes ? '目前沒有錯題，繼續保持！' : '尚未收藏任何題目，作答時點擊「收藏」即可加入。'}
           </li>
         )}

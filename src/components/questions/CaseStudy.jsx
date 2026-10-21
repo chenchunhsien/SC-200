@@ -35,7 +35,7 @@ export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal })
         </span>
         <h2 className="text-lg font-bold text-slate-900">{q.caseInfo?.title}</h2>
       </div>
-      {q.question && <RichText text={q.question} className="text-sm text-slate-600" />}
+      {q.question && <RichText text={q.question} className="text-base text-slate-700" />}
 
       <div className={`grid gap-4 ${infoOpen ? 'lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]' : 'lg:grid-cols-[3rem_1fr]'}`}>
         {/* 左欄：背景資訊（可折疊） */}
@@ -61,7 +61,7 @@ export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal })
                     className={`whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition ${
                       tab === i
                         ? 'border-violet-600 bg-white text-violet-700'
-                        : 'border-transparent text-slate-500 hover:text-slate-800'
+                        : 'border-transparent text-slate-600 hover:text-slate-800'
                     }`}
                   >
                     {s.title}
@@ -72,13 +72,13 @@ export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal })
                 type="button"
                 onClick={() => setInfoOpen(false)}
                 title="收合情境背景"
-                className="shrink-0 border-l border-slate-200 px-3 text-slate-500 hover:bg-white hover:text-violet-700"
+                className="shrink-0 border-l border-slate-200 px-3 text-slate-600 hover:bg-white hover:text-violet-700"
               >
                 <PanelLeftClose className="h-4 w-4" />
               </button>
             </nav>
             <div className="overflow-y-auto p-5">
-              <RichText text={sections[tab]?.content} className="text-sm text-slate-700" />
+              <RichText text={sections[tab]?.content} className="text-base text-slate-800" />
             </div>
           </aside>
         )}

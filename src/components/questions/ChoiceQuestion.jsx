@@ -15,7 +15,7 @@ export default function ChoiceQuestion({ q, answer, onChange, revealed }) {
   return (
     <div className="space-y-2.5">
       {multi && (
-        <p className="text-sm text-slate-500">
+        <p className="text-sm text-slate-600">
           請選擇 {q.answer.length} 個答案（已選 {selected.length} 個）
         </p>
       )}
@@ -43,11 +43,11 @@ export default function ChoiceQuestion({ q, answer, onChange, revealed }) {
             <span
               className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center border-2 text-xs font-bold ${
                 multi ? 'rounded-md' : 'rounded-full'
-              } ${isSel ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 text-slate-500'}`}
+              } ${isSel ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 text-slate-600'}`}
             >
               {opt.id}
             </span>
-            <span className="flex-1">{opt.text}</span>
+            <span className="flex-1 text-base leading-[1.65]">{opt.text}</span>
             {revealed && isCorrect && <Check className="h-5 w-5 shrink-0 text-emerald-600" />}
             {revealed && isSel && !isCorrect && <X className="h-5 w-5 shrink-0 text-rose-600" />}
           </button>

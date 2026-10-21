@@ -1,5 +1,19 @@
 @import "tailwindcss";
 
+/* 字級整體放大一階，提升桌機閱讀舒適度；根節點維持 16px，間距與版面不受影響 */
+@theme {
+  --text-xs: 0.8125rem; /* 13px，最小輔助文字 */
+  --text-xs--line-height: 1.5;
+  --text-sm: 0.9375rem; /* 15px，按鈕與說明文字 */
+  --text-sm--line-height: 1.6;
+  --text-base: 1.0625rem; /* 17px，內文與選項 */
+  --text-base--line-height: 1.7;
+  --text-lg: 1.1875rem; /* 19px，題目敘述 */
+  --text-lg--line-height: 1.75;
+  --text-xl: 1.3125rem; /* 21px */
+  --text-xl--line-height: 1.6;
+}
+
 @layer base {
-  body { @apply text-slate-800 antialiased; font-family: "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
+  body { @apply text-base text-slate-800 antialiased; font-family: "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
 }

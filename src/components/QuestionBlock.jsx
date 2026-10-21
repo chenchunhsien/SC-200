@@ -29,7 +29,7 @@ export default function QuestionBlock({ q, answer, onChange, revealed, onCheck }
         <span className="inline-block rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-semibold text-blue-700">
           {TYPE_LABELS[q.type] ?? q.type}
         </span>
-        <RichText text={q.question} className="text-[1.02rem] text-slate-800" />
+        <RichText text={q.question} className="text-lg text-slate-900" />
         {q.code && <CodeBlock code={q.code} />}
       </div>
 
@@ -91,7 +91,7 @@ export function Explanation({ q, grade }) {
             <BookOpen className="h-4 w-4" />
             解析
           </h4>
-          <RichText text={q.explanation} className="text-sm text-slate-700" />
+          <RichText text={q.explanation} className="text-base text-slate-800" />
           {q.references?.length > 0 && (
             <ul className="mt-3 space-y-1 border-t border-amber-200 pt-3 text-sm">
               {q.references.map((r) => (

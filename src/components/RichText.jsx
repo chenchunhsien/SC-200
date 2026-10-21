@@ -25,7 +25,7 @@ export default function RichText({ text, className = '' }) {
   if (!text) return null
   const chunks = text.split(/```[\w-]*\n?([\s\S]*?)```/)
   return (
-    <div className={`space-y-3 leading-relaxed ${className}`}>
+    <div className={`space-y-3 leading-[1.75] ${className}`}>
       {chunks.map((chunk, i) =>
         i % 2 === 1 ? <CodeBlock key={i} code={chunk.replace(/\n$/, '')} /> : <Paragraphs key={i} text={chunk.trim()} />,
       )}

@@ -200,7 +200,7 @@ function Shell() {
             {error}
           </div>
         ) : !bank ? (
-          <div className="flex items-center justify-center gap-2 py-24 text-slate-500">
+          <div className="flex items-center justify-center gap-2 py-24 text-slate-600">
             <Loader2 className="h-5 w-5 animate-spin" />
             載入題庫中…
           </div>

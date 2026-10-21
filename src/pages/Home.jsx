@@ -10,6 +10,7 @@ import {
   Upload,
   GraduationCap,
   Layers,
+  ListOrdered,
   Play,
   RotateCcw,
   Shuffle,
@@ -21,7 +22,7 @@ import {
 import { qKey, useStore } from '../lib/store'
 import { shuffle } from '../lib/grading'
 import { correctUnits, countQuestions, questionUnits } from '../lib/customBank'
-import { drawMockExam } from '../lib/mockExam'
+import { drawMockExam, parseNumberRanges, pickByNumbers } from '../lib/mockExam'
 
 const MOCK_SIZES = [50, 100]
 
@@ -29,6 +30,8 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
   const { history, mistakes, starred, progress, resetBank } = useStore()
   const [mode, setMode] = useState('practice')
   const [shuffled, setShuffled] = useState(false)
+  const [customCount, setCustomCount] = useState('10')
+  const [rangeText, setRangeText] = useState('')
 
   const questions = bank.questions
   const stats = useMemo(() => {
@@ -61,6 +64,32 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
     const { questions: list, total } = drawMockExam(questions, size)
     onStart({ title: `隨機模擬測驗（${total} 題）`, questions: list, mode: 'exam', source: 'mock' })
   }
+  const countValue = Number(customCount)
+  const countValid = Number.isInteger(countValue) && countValue >= 1
+
+  // 指定題號：輸入時即時解析並預覽題數
+  const range = useMemo(() => {
+    if (!rangeText.trim()) return null
+    const parsed = parseNumberRanges(rangeText, stats.total)
+    return parsed.error ? parsed : { ...parsed, ...pickByNumbers(questions, parsed.numbers) }
+  }, [rangeText, stats.total, questions])
+  const rangeHint = !range
+    ? null
+    : range.error
+      ? range.error
+      : !range.questions.length
+        ? `找不到符合的題目，題號範圍為 1–${stats.total}`
+        : [
+            `共 ${range.total} 題`,
+            range.added > 0 && `為保持題組完整，額外納入 ${range.added} 個子題`,
+            range.outOfRange && `超出 1–${stats.total} 的題號已略過`,
+          ]
+            .filter(Boolean)
+            .join('；')
+  const startRange = (e) => {
+    e.preventDefault()
+    if (range?.questions?.length) start(`指定題號：${rangeText.trim()}`, range.questions, 'range')
+  }
 
   const bankProgress = progress[bank.id] || {}
 
@@ -89,7 +118,7 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
             考試模式
           </ModeBtn>
         </div>
-        <p className="flex-1 text-sm text-slate-500">
+        <p className="flex-1 text-sm text-slate-600">
           {mode === 'practice' ? '每題可即時對答案並查看解析。' : '計時作答，交卷後才顯示成績與解析。'}
         </p>
         <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-slate-700">
@@ -142,17 +171,19 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
         />
       </section>
 
-      <section className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center">
-        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
-          <Dices className="h-5 w-5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h2 className="font-semibold text-slate-900">隨機模擬測驗</h2>
-          <p className="text-sm text-slate-500">
-            從所有章節隨機抽題，以考試模式計時作答，交卷後顯示成績與解析。情境題組整組出題，題數以子題計。
-          </p>
+      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-start gap-4">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+            <Dices className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="font-semibold text-slate-900">隨機模擬測驗</h2>
+            <p className="text-sm text-slate-600">
+              從所有章節隨機抽題，以考試模式計時作答，交卷後顯示成績與解析。情境題組整組出題，題數以子題計。
+            </p>
+          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:pl-15">
           {MOCK_SIZES.map((size) => (
             <button
               key={size}
@@ -165,7 +196,75 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
               隨機 {size} 題
             </button>
           ))}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (countValid) startMock(countValue)
+            }}
+            className="flex items-center gap-2 border-slate-200 sm:ml-2 sm:border-l sm:pl-4"
+          >
+            <label htmlFor="mock-count" className="text-sm text-slate-700">
+              自訂
+            </label>
+            <input
+              id="mock-count"
+              type="number"
+              min="1"
+              max={stats.total}
+              value={customCount}
+              onChange={(e) => setCustomCount(e.target.value)}
+              className="w-20 rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm"
+            />
+            <span className="text-sm text-slate-700">題</span>
+            <button
+              type="submit"
+              disabled={!countValid}
+              title={countValid && countValue > stats.total ? `題庫只有 ${stats.total} 題，將使用全部題目` : undefined}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-sm font-semibold text-violet-700 hover:bg-violet-100 disabled:border-slate-200 disabled:bg-slate-50 disabled:text-slate-300"
+            >
+              <Play className="h-4 w-4" />
+              開始
+            </button>
+          </form>
         </div>
+      </section>
+
+      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-start gap-4">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-100 text-sky-700">
+            <ListOrdered className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="font-semibold text-slate-900">指定題號練習</h2>
+            <p className="text-sm text-slate-600">
+              輸入單題或範圍（1–{stats.total}），例如 1-30, 45, 60-70。題號依題庫順序、以子題計，與「全部題目」的題號相同；
+              範圍涵蓋情境題組的任一子題時會整組納入。套用上方的練習 / 考試模式與隨機題序設定。
+            </p>
+          </div>
+        </div>
+        <form onSubmit={startRange} className="space-y-2 sm:pl-15">
+          <div className="flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={rangeText}
+              onChange={(e) => setRangeText(e.target.value)}
+              placeholder="例如 1-30, 45, 60-70"
+              aria-label="指定題號"
+              className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            />
+            <button
+              type="submit"
+              disabled={!range?.questions?.length}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:bg-slate-300"
+            >
+              <Play className="h-4 w-4" />
+              開始練習
+            </button>
+          </div>
+          {rangeHint && (
+            <p className={`text-sm ${range?.questions?.length ? 'text-slate-600' : 'text-rose-600'}`}>{rangeHint}</p>
+          )}
+        </form>
       </section>
 
       <section>
@@ -185,7 +284,7 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
                   </span>
                   <div className="min-w-0 flex-1">
                     <h3 className="font-semibold text-slate-900">{ch.title}</h3>
-                    {ch.description && <p className="mt-0.5 text-sm text-slate-500">{ch.description}</p>}
+                    {ch.description && <p className="mt-0.5 text-sm text-slate-600">{ch.description}</p>}
                   </div>
                   {pct === 100 && <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />}
                 </div>
@@ -196,7 +295,7 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                  <span className="w-24 text-right text-xs text-slate-500">
+                  <span className="w-24 text-right text-xs text-slate-600">
                     {done} / {size} · {pct}%
                   </span>
                   <button
@@ -222,7 +321,7 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
             if (window.confirm('確定要清除此題庫的作答紀錄、錯題本、收藏與章節進度嗎？此動作無法復原。'))
               resetBank(bank.id)
           }}
-          className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-rose-600"
+          className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-rose-600"
         >
           <RotateCcw className="h-4 w-4" />
           清除此題庫紀錄
@@ -295,7 +394,7 @@ function ModeBtn({ active, onClick, icon: Icon, children }) {
       type="button"
       onClick={onClick}
       className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-semibold transition ${
-        active ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+        active ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-800'
       }`}
     >
       <Icon className="h-4 w-4" />
@@ -323,7 +422,7 @@ function ActionCard({ icon: Icon, title, desc, onClick, disabled, tone }) {
       </span>
       <span>
         <span className="block font-semibold text-slate-900">{title}</span>
-        <span className="block text-sm text-slate-500">{desc}</span>
+        <span className="block text-sm text-slate-600">{desc}</span>
       </span>
     </button>
   )

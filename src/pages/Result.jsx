@@ -116,17 +116,17 @@ export default function Result({ bank, result, onRetry, onHome }) {
                   ) : (
                     <XCircle className="h-5 w-5 shrink-0 text-rose-500" />
                   )}
-                  <span className="shrink-0 text-sm font-semibold text-slate-500">#{n}</span>
+                  <span className="shrink-0 text-sm font-semibold text-slate-600">#{n}</span>
                   <span className="hidden shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600 sm:inline">
                     {TYPE_LABELS[q.type]}
                   </span>
                   <span className="truncate text-sm text-slate-700">{previewText(q)}</span>
                   {grade.total > 1 && (
-                    <span className="ml-auto shrink-0 text-xs text-slate-500">
+                    <span className="ml-auto shrink-0 text-xs text-slate-600">
                       {grade.earned}/{grade.total}
                     </span>
                   )}
-                  <ChevronDown className={`h-4 w-4 shrink-0 text-slate-400 transition ${isOpen ? 'rotate-180' : ''}`} />
+                  <ChevronDown className={`h-4 w-4 shrink-0 text-slate-500 transition ${isOpen ? 'rotate-180' : ''}`} />
                 </button>
                 <button
                   type="button"
@@ -134,7 +134,7 @@ export default function Result({ bank, result, onRetry, onHome }) {
                   title={isStar ? '取消收藏' : '收藏'}
                   className="shrink-0 rounded p-1 hover:bg-slate-100"
                 >
-                  <Star className={`h-4 w-4 ${isStar ? 'fill-amber-400 text-amber-500' : 'text-slate-400'}`} />
+                  <Star className={`h-4 w-4 ${isStar ? 'fill-amber-400 text-amber-500' : 'text-slate-500'}`} />
                 </button>
               </div>
               {isOpen && (
@@ -150,7 +150,7 @@ export default function Result({ bank, result, onRetry, onHome }) {
             </div>
           )
         })}
-        {!shown.length && <p className="py-10 text-center text-slate-400">沒有符合條件的題目</p>}
+        {!shown.length && <p className="py-10 text-center text-slate-500">沒有符合條件的題目</p>}
       </section>
     </div>
   )

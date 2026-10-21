@@ -21,7 +21,7 @@ export default function StatementMatrix({ q, answer, onChange, revealed, grade }
             const rowTone = revealed ? (ok ? 'bg-emerald-50' : 'bg-rose-50') : 'hover:bg-slate-50'
             return (
               <tr key={s.id} className={`border-t border-slate-200 ${rowTone}`}>
-                <td className="break-words px-4 py-3">{s.text}</td>
+                <td className="break-words px-4 py-3 leading-[1.65]">{s.text}</td>
                 {[true, false].map((v) => (
                   <td key={String(v)} className="px-2 py-3 text-center">
                     <input
