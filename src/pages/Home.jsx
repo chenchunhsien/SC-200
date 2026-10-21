@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Database,
+  Dices,
   HardDrive,
   Trash2,
   Upload,
@@ -20,6 +21,9 @@ import {
 import { qKey, useStore } from '../lib/store'
 import { shuffle } from '../lib/grading'
 import { correctUnits, countQuestions, questionUnits } from '../lib/customBank'
+import { drawMockExam } from '../lib/mockExam'
+
+const MOCK_SIZES = [50, 100]
 
 export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImport, onClearCustom }) {
   const { history, mistakes, starred, progress, resetBank } = useStore()
@@ -50,6 +54,12 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
   const start = (title, list, source) => {
     if (!list.length) return
     onStart({ title, questions: shuffled ? shuffle(list) : list, mode, source })
+  }
+
+  // 隨機模擬測驗固定使用考試模式，不受練習 / 考試切換與隨機題序影響
+  const startMock = (size) => {
+    const { questions: list, total } = drawMockExam(questions, size)
+    onStart({ title: `隨機模擬測驗（${total} 題）`, questions: list, mode: 'exam', source: 'mock' })
   }
 
   const bankProgress = progress[bank.id] || {}
@@ -130,6 +140,32 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
           }
           tone="amber"
         />
+      </section>
+
+      <section className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center">
+        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+          <Dices className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 className="font-semibold text-slate-900">隨機模擬測驗</h2>
+          <p className="text-sm text-slate-500">
+            從所有章節隨機抽題，以考試模式計時作答，交卷後顯示成績與解析。情境題組整組出題，題數以子題計。
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {MOCK_SIZES.map((size) => (
+            <button
+              key={size}
+              type="button"
+              onClick={() => startMock(size)}
+              title={stats.total < size ? `題庫只有 ${stats.total} 題，將使用全部題目` : undefined}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700"
+            >
+              <Play className="h-4 w-4" />
+              隨機 {size} 題
+            </button>
+          ))}
+        </div>
       </section>
 
       <section>

@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import { Award, CheckCircle2, ChevronDown, Home, RotateCcw, Star, XCircle } from 'lucide-react'
 import QuestionView from '../components/QuestionView'
-import { gradeQuestion, previewText, TYPE_LABELS } from '../lib/grading'
+import { correctUnitsOf, gradeQuestion, previewText, TYPE_LABELS } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
+import { numberQuestions } from '../lib/customBank'
 import SourceLabel from '../components/SourceLabel'
 import { formatTime } from './Quiz'
 
@@ -21,6 +22,9 @@ export default function Result({ bank, result, onRetry, onHome }) {
   const earned = graded.reduce((s, g) => s + g.grade.earned, 0)
   const total = graded.reduce((s, g) => s + g.grade.total, 0)
   const correctCount = graded.filter((g) => g.grade.correct).length
+  // 答對題數與題號以子題計，與首頁、作答頁一致
+  const numbering = numberQuestions(questions)
+  const correctUnits = graded.reduce((n, g) => n + correctUnitsOf(g.q, g.grade), 0)
   const scaled = total ? Math.round((earned / total) * 1000) : 0
   const passed = scaled >= PASS_SCORE
   const wrong = graded.filter((g) => !g.grade.correct).map((g) => g.q)
@@ -51,7 +55,7 @@ export default function Result({ bank, result, onRetry, onHome }) {
             </div>
           </div>
           <dl className="grid grid-cols-3 gap-4 text-center">
-            <Metric label="答對題數" value={`${correctCount} / ${questions.length}`} />
+            <Metric label="答對題數" value={`${correctUnits} / ${numbering.total}`} />
             <Metric label="得分點" value={`${earned} / ${total}`} />
             <Metric label="用時" value={formatTime(elapsed)} />
           </dl>
@@ -96,7 +100,7 @@ export default function Result({ bank, result, onRetry, onHome }) {
 
       <section className="space-y-3">
         {shown.map(({ q, grade }) => {
-          const n = questions.indexOf(q) + 1
+          const n = numbering.labels[questions.indexOf(q)]
           const isOpen = open === q.id
           const isStar = !!starred[qKey(bank.id, q.id)]
           return (

@@ -4,6 +4,7 @@ import QuestionView from '../components/QuestionView'
 import SourceLabel from '../components/SourceLabel'
 import { gradeQuestion, isAnswered, isTouched } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
+import { numberQuestions, questionUnits } from '../lib/customBank'
 
 export const formatTime = (sec) => {
   const m = Math.floor(sec / 60)
@@ -21,6 +22,8 @@ export default function Quiz({ bank, config, onFinish }) {
   const [elapsed, setElapsed] = useState(0)
   const recorded = useRef(new Set())
   const chapterTitle = Object.fromEntries(bank.chapters.map((c) => [c.id, c.title]))
+  // 題號與題數以子題計，情境題組顯示為範圍（例如 12–15）
+  const numbering = numberQuestions(questions)
 
   useEffect(() => {
     const t = setInterval(() => setElapsed((e) => e + 1), 1000)
@@ -51,10 +54,10 @@ export default function Quiz({ bank, config, onFinish }) {
       ? question.questions.every((s) => revealed[`${question.id}/${s.id}`])
       : !!revealed[question.id]
 
-  const answeredCount = questions.filter((x) => isAnswered(x, answers[x.id])).length
+  const answeredCount = questions.reduce((n, x) => n + (isAnswered(x, answers[x.id]) ? questionUnits(x) : 0), 0)
 
   const submit = () => {
-    const unanswered = questions.length - answeredCount
+    const unanswered = numbering.total - answeredCount
     const msg = unanswered ? `尚有 ${unanswered} 題未完成作答，確定要交卷嗎？` : '確定要交卷嗎？'
     if (!window.confirm(msg)) return
     questions.forEach((x) => record(x, answers[x.id]))
@@ -82,7 +85,7 @@ export default function Quiz({ bank, config, onFinish }) {
         <div className="min-w-0 flex-1">
           <h1 className="truncate font-bold text-slate-900">{title}</h1>
           <p className="text-xs text-slate-500">
-            {practice ? '練習模式' : '考試模式'} · 已作答 {answeredCount} / {questions.length}
+            {practice ? '練習模式' : '考試模式'} · 已作答 {answeredCount} / {numbering.total}
           </p>
         </div>
         <span className="inline-flex items-center gap-1.5 rounded-lg bg-slate-100 px-3 py-1.5 font-mono text-sm text-slate-700">
@@ -105,7 +108,7 @@ export default function Quiz({ bank, config, onFinish }) {
           <header className="mb-5 flex items-start gap-3 border-b border-slate-100 pb-4">
             <div className="flex-1">
               <div className="text-sm font-semibold text-blue-700">
-                第 {idx + 1} / {questions.length} 題
+                第 {numbering.labels[idx]} / {numbering.total} 題
               </div>
               {q.chapter && <div className="text-xs text-slate-500">{chapterTitle[q.chapter] ?? q.chapter}</div>}
               {q.source && <SourceLabel source={q.source} />}
@@ -173,9 +176,11 @@ export default function Quiz({ bank, config, onFinish }) {
                 key={x.id}
                 type="button"
                 onClick={() => setIdx(i)}
+                title={`第 ${numbering.labels[i]} 題`}
                 className={`relative flex aspect-square items-center justify-center rounded-lg border text-sm font-semibold transition ${statusTone(x, i)}`}
               >
-                {i + 1}
+                {numbering.starts[i]}
+                {questionUnits(x) > 1 && <span className="text-[10px] font-normal opacity-75">+</span>}
                 {starred[qKey(bank.id, x.id)] && (
                   <Star className="absolute -right-1 -top-1 h-3 w-3 fill-amber-400 text-amber-500" />
                 )}

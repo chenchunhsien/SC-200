@@ -72,6 +72,12 @@ export function gradeQuestion(q, ans) {
   }
 }
 
+/** 依評分結果計算答對的題數（情境題組以子題計） */
+export function correctUnitsOf(q, grade) {
+  if (q.type !== 'case_study') return grade.correct ? 1 : 0
+  return q.questions.filter((s) => grade.detail[s.id]?.correct).length
+}
+
 /** 是否已完整作答 */
 export function isAnswered(q, ans) {
   if (ans == null) return false

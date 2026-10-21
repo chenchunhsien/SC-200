@@ -53,6 +53,19 @@ export function countQuestions(bank) {
   return bank.questions.reduce((n, q) => n + questionUnits(q), 0)
 }
 
+/** 依序為每題編題號（情境題組佔多個題號，例如 "12–15"），回傳 { labels, starts, total } */
+export function numberQuestions(questions) {
+  let total = 0
+  const starts = []
+  const labels = questions.map((q) => {
+    const n = questionUnits(q)
+    starts.push(total + 1)
+    total += n
+    return n > 1 ? `${total - n + 1}–${total}` : `${total}`
+  })
+  return { labels, starts, total }
+}
+
 /** 依作答紀錄計算某題答對的題數；舊紀錄沒有子題明細時，以整組對錯推算 */
 export function correctUnits(q, h) {
   if (q.type !== 'case_study') return h.lastCorrect ? 1 : 0
