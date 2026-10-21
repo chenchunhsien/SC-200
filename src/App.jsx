@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, BookMarked, CheckCircle2, Home as HomeIcon, Loader2, ShieldCheck, Upload, X } from 'lucide-react'
 import { StoreProvider } from './lib/store'
-import { clearCustomBank, countQuestions, loadCustomBank, saveCustomBank } from './lib/customBank'
+import {
+  clearCustomBank,
+  countQuestions,
+  fetchDriveBank,
+  loadCustomBank,
+  saveCustomBank,
+  saveDriveLink,
+} from './lib/customBank'
 import { validateBank } from './lib/validateBank'
 import Home from './pages/Home'
 import Quiz from './pages/Quiz'
@@ -94,6 +101,28 @@ function Shell() {
     go('home')
   }
 
+  // 本機檔案與雲端連結共用：檢查格式 → 寫入 IndexedDB → 切換到自訂題庫；成功回傳 true
+  const importBank = async (data, name) => {
+    const errs = validateBank(data)
+    if (errs.length) {
+      setNotice({
+        tone: 'error',
+        title: `「${name}」格式不符，共 ${errs.length} 個問題，未匯入`,
+        lines: errs.slice(0, 8).concat(errs.length > 8 ? [`…其餘 ${errs.length - 8} 個問題省略`] : []),
+      })
+      return false
+    }
+    try {
+      setCustom(await saveCustomBank(data, name))
+    } catch (err) {
+      setNotice({ tone: 'error', title: `無法儲存到瀏覽器（${err?.message ?? '儲存空間不可用'}）` })
+      return false
+    }
+    switchSource(CUSTOM)
+    setNotice({ tone: 'ok', title: `已匯入「${data.title || name}」，共 ${countQuestions(data)} 題` })
+    return true
+  }
+
   const onFile = async (e) => {
     const file = e.target.files?.[0]
     e.target.value = '' // 允許重新選擇同一個檔案
@@ -104,21 +133,20 @@ function Shell() {
     } catch {
       return setNotice({ tone: 'error', title: `「${file.name}」不是有效的 JSON 檔案` })
     }
-    const errs = validateBank(data)
-    if (errs.length) {
-      return setNotice({
-        tone: 'error',
-        title: `「${file.name}」格式不符，共 ${errs.length} 個問題，未匯入`,
-        lines: errs.slice(0, 8).concat(errs.length > 8 ? [`…其餘 ${errs.length - 8} 個問題省略`] : []),
-      })
-    }
+    importBank(data, file.name)
+  }
+
+  const onDriveImport = async (link) => {
+    let data
     try {
-      setCustom(await saveCustomBank(data, file.name))
+      data = await fetchDriveBank(link)
     } catch (err) {
-      return setNotice({ tone: 'error', title: `無法儲存到瀏覽器（${err?.message ?? '儲存空間不可用'}）` })
+      setNotice({ tone: 'error', title: '無法從 Google 雲端硬碟載入題庫', lines: [err.message] })
+      return false
     }
-    switchSource(CUSTOM)
-    setNotice({ tone: 'ok', title: `已匯入「${data.title || file.name}」，共 ${countQuestions(data)} 題` })
+    const ok = await importBank(data, 'Google 雲端硬碟')
+    if (ok) saveDriveLink(link.trim())
+    return ok
   }
 
   const onClearCustom = async () => {
@@ -217,6 +245,7 @@ function Shell() {
             onStart={startQuiz}
             onOpenNotebook={(tab) => go('notebook', { tab })}
             onImport={() => fileInput.current?.click()}
+            onImportDrive={onDriveImport}
             onClearCustom={onClearCustom}
           />
         )}
