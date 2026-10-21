@@ -1,4 +1,5 @@
 {
+  "$schema": "./questions.schema.json",
   "id": "mock",
   "title": "SC-200 範例題庫",
   "description": "涵蓋單選、複選、KQL 下拉挖空、步驟排序、Yes/No 判斷與情境題組等 SC-200 常見題型的範例資料。",

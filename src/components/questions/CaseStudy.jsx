@@ -1,5 +1,13 @@
 import { useState } from 'react'
-import { Building2, CheckCircle2, ChevronLeft, ChevronRight, XCircle } from 'lucide-react'
+import {
+  Building2,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
+  XCircle,
+} from 'lucide-react'
 import { gradeQuestion, isAnswered } from '../../lib/grading'
 import QuestionBlock, { Explanation } from '../QuestionBlock'
 import RichText from '../RichText'
@@ -11,6 +19,7 @@ import RichText from '../RichText'
 export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal }) {
   const [tab, setTab] = useState(0)
   const [subIdx, setSubIdx] = useState(0)
+  const [infoOpen, setInfoOpen] = useState(true)
   const value = answer || {}
   const sections = q.caseInfo?.sections ?? []
   const sub = q.questions[subIdx]
@@ -27,29 +36,51 @@ export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal })
       </div>
       {q.question && <RichText text={q.question} className="text-sm text-slate-600" />}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        {/* 左欄：背景資訊 */}
-        <aside className="flex max-h-[75vh] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white lg:sticky lg:top-20">
-          <nav className="flex shrink-0 overflow-x-auto border-b border-slate-200 bg-slate-50">
-            {sections.map((s, i) => (
+      <div className={`grid gap-4 ${infoOpen ? 'lg:grid-cols-2' : 'lg:grid-cols-[3rem_1fr]'}`}>
+        {/* 左欄：背景資訊（可折疊） */}
+        {!infoOpen ? (
+          <button
+            type="button"
+            onClick={() => setInfoOpen(true)}
+            title="展開情境背景"
+            className="flex items-center justify-center gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-semibold text-violet-700 transition hover:bg-violet-100 lg:sticky lg:top-20 lg:h-[50vh] lg:flex-col lg:py-4"
+          >
+            <PanelLeftOpen className="h-5 w-5 shrink-0" />
+            <span className="lg:[writing-mode:vertical-rl]">展開情境背景</span>
+          </button>
+        ) : (
+          <aside className="flex max-h-[75vh] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white lg:sticky lg:top-20">
+            <nav className="flex shrink-0 items-stretch border-b border-slate-200 bg-slate-50">
+              <div className="flex min-w-0 flex-1 overflow-x-auto">
+                {sections.map((s, i) => (
+                  <button
+                    key={s.title}
+                    type="button"
+                    onClick={() => setTab(i)}
+                    className={`whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                      tab === i
+                        ? 'border-violet-600 bg-white text-violet-700'
+                        : 'border-transparent text-slate-500 hover:text-slate-800'
+                    }`}
+                  >
+                    {s.title}
+                  </button>
+                ))}
+              </div>
               <button
-                key={s.title}
                 type="button"
-                onClick={() => setTab(i)}
-                className={`whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition ${
-                  tab === i
-                    ? 'border-violet-600 bg-white text-violet-700'
-                    : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
+                onClick={() => setInfoOpen(false)}
+                title="收合情境背景"
+                className="shrink-0 border-l border-slate-200 px-3 text-slate-500 hover:bg-white hover:text-violet-700"
               >
-                {s.title}
+                <PanelLeftClose className="h-4 w-4" />
               </button>
-            ))}
-          </nav>
-          <div className="overflow-y-auto p-5">
-            <RichText text={sections[tab]?.content} className="text-sm text-slate-700" />
-          </div>
-        </aside>
+            </nav>
+            <div className="overflow-y-auto p-5">
+              <RichText text={sections[tab]?.content} className="text-sm text-slate-700" />
+            </div>
+          </aside>
+        )}
 
         {/* 右欄：子題 */}
         <section className="rounded-xl border border-slate-200 bg-white p-5">
