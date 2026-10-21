@@ -3,6 +3,7 @@ import { Award, CheckCircle2, ChevronDown, Home, RotateCcw, Star, XCircle } from
 import QuestionView from '../components/QuestionView'
 import { gradeQuestion, previewText, TYPE_LABELS } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
+import SourceLabel from '../components/SourceLabel'
 import { formatTime } from './Quiz'
 
 const PASS_SCORE = 700
@@ -134,6 +135,11 @@ export default function Result({ bank, result, onRetry, onHome }) {
               </div>
               {isOpen && (
                 <div className="border-t border-slate-100 p-5">
+                  {q.source && (
+                    <div className="mb-3">
+                      <SourceLabel source={q.source} />
+                    </div>
+                  )}
                   <QuestionView q={q} answer={answers[q.id]} onChange={() => {}} isRevealed={() => true} onReveal={null} />
                 </div>
               )}

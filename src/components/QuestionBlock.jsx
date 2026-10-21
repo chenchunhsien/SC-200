@@ -1,4 +1,4 @@
-import { BookOpen, CheckCircle2, ExternalLink, Eye, XCircle } from 'lucide-react'
+import { AlertTriangle, BookOpen, CheckCircle2, ExternalLink, Eye, XCircle } from 'lucide-react'
 import { gradeQuestion, isAnswered, TYPE_LABELS } from '../lib/grading'
 import RichText, { CodeBlock } from './RichText'
 import ChoiceQuestion from './questions/ChoiceQuestion'
@@ -74,6 +74,15 @@ export function Explanation({ q, grade }) {
               得分 {grade.earned} / {grade.total}
             </span>
           )}
+        </div>
+      )}
+      {q.reviewNote && (
+        <div className="flex gap-2 rounded-lg border border-orange-300 bg-orange-50 p-4 text-sm text-orange-900">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <span className="font-semibold">待確認：</span>
+            {q.reviewNote}
+          </div>
         </div>
       )}
       {(q.explanation || q.references?.length > 0) && (

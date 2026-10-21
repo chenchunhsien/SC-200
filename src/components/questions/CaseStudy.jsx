@@ -11,6 +11,7 @@ import {
 import { gradeQuestion, isAnswered } from '../../lib/grading'
 import QuestionBlock, { Explanation } from '../QuestionBlock'
 import RichText from '../RichText'
+import SourceLabel from '../SourceLabel'
 
 /**
  * 情境題組：左欄背景資訊（可切換分頁），右欄子題目。
@@ -36,7 +37,7 @@ export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal })
       </div>
       {q.question && <RichText text={q.question} className="text-sm text-slate-600" />}
 
-      <div className={`grid gap-4 ${infoOpen ? 'lg:grid-cols-2' : 'lg:grid-cols-[3rem_1fr]'}`}>
+      <div className={`grid gap-4 ${infoOpen ? 'lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]' : 'lg:grid-cols-[3rem_1fr]'}`}>
         {/* 左欄：背景資訊（可折疊） */}
         {!infoOpen ? (
           <button
@@ -113,6 +114,7 @@ export default function CaseStudy({ q, answer, onChange, isRevealed, onReveal })
             })}
           </div>
 
+          {sub.source && <SourceLabel source={sub.source} className="-mt-2 mb-3" />}
           <QuestionBlock
             key={sub.id}
             q={sub}

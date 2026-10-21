@@ -7,3 +7,7 @@ dist
 !.env.example
 __pycache__/
 .venv/
+*.pdf
+public/data/*.drafts.json
+public/data/sc200.json
+public/data/*.real.json

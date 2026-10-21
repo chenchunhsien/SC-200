@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Clock, Flag, Send, Star } from 'lucide-react'
 import QuestionView from '../components/QuestionView'
+import SourceLabel from '../components/SourceLabel'
 import { gradeQuestion, isAnswered, isTouched } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
 
@@ -107,6 +108,7 @@ export default function Quiz({ bank, config, onFinish }) {
                 第 {idx + 1} / {questions.length} 題
               </div>
               {q.chapter && <div className="text-xs text-slate-500">{chapterTitle[q.chapter] ?? q.chapter}</div>}
+              {q.source && <SourceLabel source={q.source} />}
             </div>
             <button
               type="button"

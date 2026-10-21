@@ -20,11 +20,24 @@ function renderInline(text, keyPrefix) {
   })
 }
 
+// ``` 圍起來的區塊以 CodeBlock 呈現，其餘依段落處理
 export default function RichText({ text, className = '' }) {
+  if (!text) return null
+  const chunks = text.split(/```[\w-]*\n?([\s\S]*?)```/)
+  return (
+    <div className={`space-y-3 leading-relaxed ${className}`}>
+      {chunks.map((chunk, i) =>
+        i % 2 === 1 ? <CodeBlock key={i} code={chunk.replace(/\n$/, '')} /> : <Paragraphs key={i} text={chunk.trim()} />,
+      )}
+    </div>
+  )
+}
+
+function Paragraphs({ text }) {
   if (!text) return null
   const paragraphs = text.split(/\n\s*\n/)
   return (
-    <div className={`space-y-3 leading-relaxed ${className}`}>
+    <>
       {paragraphs.map((p, i) => (
         <p key={i}>
           {p.split('\n').map((line, j) => (
@@ -42,7 +55,7 @@ export default function RichText({ text, className = '' }) {
           ))}
         </p>
       ))}
-    </div>
+    </>
   )
 }
 

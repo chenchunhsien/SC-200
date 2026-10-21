@@ -6,13 +6,13 @@ export default function StatementMatrix({ q, answer, onChange, revealed, grade }
 
   return (
     <div className="overflow-x-auto rounded-lg border border-slate-200">
-      <table className="w-full min-w-[480px] border-collapse bg-white text-left">
+      <table className="w-full table-fixed border-collapse bg-white text-left">
         <thead className="bg-slate-100 text-sm text-slate-600">
           <tr>
             <th className="px-4 py-2.5 font-semibold">Statements</th>
-            <th className="w-20 px-2 py-2.5 text-center font-semibold">{yesLabel}</th>
-            <th className="w-20 px-2 py-2.5 text-center font-semibold">{noLabel}</th>
-            {revealed && <th className="w-24 px-2 py-2.5 text-center font-semibold">正解</th>}
+            <th className="w-16 px-1 py-2.5 text-center font-semibold">{yesLabel}</th>
+            <th className="w-16 px-1 py-2.5 text-center font-semibold">{noLabel}</th>
+            {revealed && <th className="w-20 px-1 py-2.5 text-center font-semibold">正解</th>}
           </tr>
         </thead>
         <tbody>
@@ -21,7 +21,7 @@ export default function StatementMatrix({ q, answer, onChange, revealed, grade }
             const rowTone = revealed ? (ok ? 'bg-emerald-50' : 'bg-rose-50') : 'hover:bg-slate-50'
             return (
               <tr key={s.id} className={`border-t border-slate-200 ${rowTone}`}>
-                <td className="px-4 py-3">{s.text}</td>
+                <td className="break-words px-4 py-3">{s.text}</td>
                 {[true, false].map((v) => (
                   <td key={String(v)} className="px-2 py-3 text-center">
                     <input

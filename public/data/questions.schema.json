@@ -58,6 +58,10 @@
         "question": { "$ref": "#/$defs/richText" },
         "code": { "type": "string", "description": "選填，題幹下方的程式碼區塊" },
         "explanation": { "$ref": "#/$defs/richText" },
+        "reviewNote": {
+          "type": "string",
+          "description": "選填，待人工確認的備註（例如來源答案可能有誤）；作答後會在解析區以醒目樣式顯示"
+        },
         "references": {
           "type": "array",
           "items": {
@@ -75,6 +79,7 @@
           "description": "選填，題目來源（例如 PDF 檔名與頁碼），由 scripts/parse_pdf.py 產生",
           "properties": {
             "file": { "type": "string" },
+            "index": { "type": "integer", "description": "題目在來源 PDF 中的出現順序；題庫依此排序" },
             "number": { "type": ["string", "integer"] },
             "pages": { "type": "array", "items": { "type": "integer" } }
           }

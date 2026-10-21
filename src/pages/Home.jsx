@@ -3,6 +3,10 @@ import {
   BookOpen,
   CheckCircle2,
   ClipboardList,
+  Database,
+  HardDrive,
+  Trash2,
+  Upload,
   GraduationCap,
   Layers,
   Play,
@@ -15,8 +19,9 @@ import {
 } from 'lucide-react'
 import { qKey, useStore } from '../lib/store'
 import { shuffle } from '../lib/grading'
+import { countQuestions } from '../lib/customBank'
 
-export default function Home({ bank, onStart, onOpenNotebook }) {
+export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImport, onClearCustom }) {
   const { history, mistakes, starred, progress, resetBank } = useStore()
   const [mode, setMode] = useState('practice')
   const [shuffled, setShuffled] = useState(false)
@@ -27,13 +32,13 @@ export default function Home({ bank, onStart, onOpenNotebook }) {
     const tried = keys.filter((k) => history[k])
     const right = tried.filter((k) => history[k].lastCorrect)
     return {
-      total: questions.length,
+      total: countQuestions(bank),
       tried: tried.length,
       accuracy: tried.length ? Math.round((right.length / tried.length) * 100) : null,
       mistakes: keys.filter((k) => mistakes[k]).length,
       starred: keys.filter((k) => starred[k]).length,
     }
-  }, [questions, bank.id, history, mistakes, starred])
+  }, [questions, bank, history, mistakes, starred])
 
   const start = (title, list, source) => {
     if (!list.length) return
@@ -44,6 +49,7 @@ export default function Home({ bank, onStart, onOpenNotebook }) {
 
   return (
     <div className="space-y-8">
+      {sourceInfo && <SourceBanner info={sourceInfo} onImport={onImport} onClear={onClearCustom} />}
       <section className="rounded-2xl bg-gradient-to-br from-blue-700 via-blue-600 to-indigo-600 p-6 text-white shadow-lg sm:p-8">
         <p className="text-sm font-medium text-blue-100">Microsoft Security Operations Analyst</p>
         <h1 className="mt-1 text-2xl font-bold sm:text-3xl">{bank.title}</h1>
@@ -178,6 +184,46 @@ export default function Home({ bank, onStart, onOpenNotebook }) {
         </button>
       </div>
     </div>
+  )
+}
+
+function SourceBanner({ info, onImport, onClear }) {
+  return (
+    <section
+      className={`flex flex-wrap items-center gap-3 rounded-xl border px-4 py-3 text-sm ${
+        info.isCustom ? 'border-violet-200 bg-violet-50 text-violet-900' : 'border-slate-200 bg-white text-slate-700'
+      }`}
+    >
+      {info.isCustom ? <HardDrive className="h-5 w-5 shrink-0" /> : <Database className="h-5 w-5 shrink-0" />}
+      <div className="min-w-0 flex-1">
+        <span className="font-semibold">
+          目前使用：{info.isCustom ? `自訂題庫（共 ${info.count} 題）` : `預設範例（共 ${info.count} 題）`}
+        </span>
+        <span className="ml-2 opacity-75">
+          {info.isCustom
+            ? `${info.fileName ?? ''}${info.savedAt ? ` · 匯入於 ${new Date(info.savedAt).toLocaleString()}` : ''} · 僅存在此瀏覽器`
+            : '可匯入你自己的題庫 JSON，題目只會存在此瀏覽器、不會上傳'}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onImport}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 font-semibold text-white hover:bg-blue-700"
+      >
+        <Upload className="h-4 w-4" />
+        {info.isCustom ? '重新匯入' : '匯入個人題庫 (Upload JSON)'}
+      </button>
+      {info.isCustom && (
+        <button
+          type="button"
+          onClick={onClear}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 font-medium text-rose-600 hover:bg-rose-50"
+        >
+          <Trash2 className="h-4 w-4" />
+          清除本機題庫
+        </button>
+      )}
+    </section>
   )
 }
 

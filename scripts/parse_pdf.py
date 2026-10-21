@@ -41,8 +41,20 @@ except ImportError:  # pragma: no cover
 RE_QUESTION = re.compile(
     r"^\s*(?:QUESTION|Question)\s*(?:NO\s*[:.]?|#|:)?\s*(\d+)\b\s*(?:Topic\s*(\d+))?\s*(.*)$"
 )
-# 章節 / 主題標題，例如 "Topic 2, Contoso Ltd"、"Topic 3 - Mixed Questions"、"Section 1: ..."
-RE_TOPIC = re.compile(r"^\s*(Topic|Section|Testlet)\s*(\d+)\s*[,:.\-–—]?\s*(.*)$", re.I)
+# 題組標題：Testlet = 情境題組；Question Set / Topic = 一般題目。上一行通常是章節（domain）標題
+RE_GROUP = re.compile(r"^\s*(Testlet|Question Set|Topic)\s*(\d+)\b\s*[,:.\-–—]?\s*(.*)$", re.I)
+# 沒有 Testlet 標題時，以單獨一行的 "Overview" 判定情境題組開始
+RE_CASE_START = re.compile(r"^\s*Overview\s*$", re.I)
+# 情境背景的主分頁標題
+CASE_TABS = {"overview", "existing environment", "requirements"}
+# PDF 清單符號（常被擷取成 U+FFFD + "E"）
+RE_BULLET = re.compile(r"^(?:�\s*E|[•●▪◦■])\s*")
+# 題幹提到表格 / 圖片，但內容多半是截圖、無法擷取文字
+RE_FIGURE = re.compile(
+    r"\bfollowing (?:table|exhibit|diagram|image|graphic|figure|screenshot|configuration|output)s?\b"
+    r"|\bshown in the exhibit\b|\bClick the Exhibit\b",
+    re.I,
+)
 # 選項，例如 "A. text"、"B) text"、"C text"（後者需 --loose-options）
 RE_OPTION = re.compile(r"^\s*([A-H])[.)]\s+(.+)$")
 RE_OPTION_LOOSE = re.compile(r"^\s*([A-H])\s+(\S.+)$")
@@ -114,44 +126,185 @@ def extract_lines(pdf: Path, first: int | None, last: int | None, header_ratio: 
 @dataclass
 class RawBlock:
     number: str
-    topic: str | None
     lines: list[str] = field(default_factory=list)
     pages: list[int] = field(default_factory=list)
 
 
-def split_blocks(lines: list[str]) -> tuple[list[RawBlock], dict[str, str]]:
-    blocks: list[RawBlock] = []
-    topics: dict[str, str] = {}
-    current_topic: str | None = None
+@dataclass
+class Group:
+    """PDF 中的一段題目：情境題組（Testlet）或一般題目集（Question Set / Topic）。"""
+
+    kind: str  # "case" | "set"
+    label: str  # 例如 "Testlet 1"、"Question Set 4"
+    chapter: str  # chapters[].id
+    background: list[str] = field(default_factory=list)  # 情境背景（僅 case）
+    pages: list[int] = field(default_factory=list)
+    blocks: list[RawBlock] = field(default_factory=list)
+
+
+def looks_like_heading(s: str) -> bool:
+    s = s.strip()
+    return (
+        0 < len(s) <= 80
+        and s[0].isupper()
+        and not s.endswith((".", ":", "?", ",", ";"))
+        and not any(rx.match(s) for rx in (RE_QUESTION, RE_ANSWER, RE_OPTION, RE_GROUP))
+    )
+
+
+def split_structure(lines: list[str]) -> tuple[list[Group], list[dict]]:
+    """切分題組與題目。
+
+    章節（domain）取自 "Testlet N" / "Question Set N" / 情境 "Overview" 上一行的標題，
+    例如 "Mitigate threats using Microsoft Sentinel"。
+    """
+    chapters: dict[str, str] = {}  # title -> id
+    groups: list[Group] = []
     page = 0
+    group: Group | None = None
     cur: RawBlock | None = None
+    chapter: str | None = None
+    last: tuple[list[str], int] | None = None  # 最後一個非空內容行的位置
+    preamble: list[str] = []
+
+    def take_heading() -> str | None:
+        """標題行在遇到 Testlet 等標記前已被收進上一題，這裡把它移出。"""
+        nonlocal last
+        if last is None:
+            return None
+        lst, i = last
+        if i < len(lst) and looks_like_heading(lst[i]):
+            last = None
+            return lst.pop(i).strip()
+        return None
+
+    def start_group(kind: str, label: str, heading: str | None) -> None:
+        nonlocal group, cur, chapter
+        if heading:
+            chapter = chapters.setdefault(heading, f"d{len(chapters) + 1}")
+        elif chapter is None:
+            chapter = chapters.setdefault("未分類", f"d{len(chapters) + 1}")
+        group = Group(kind, label, chapter, pages=[page])
+        groups.append(group)
+        cur = None
 
     for ln in lines:
         if ln.startswith(PAGE_MARK):
             page = int(ln[len(PAGE_MARK):])
-            if cur and page not in cur.pages:
-                cur.pages.append(page)
+            for obj in (group, cur):
+                if obj is not None and page not in obj.pages:
+                    obj.pages.append(page)
             continue
+        s = ln.strip()
+
+        g = RE_GROUP.match(ln)
+        if g and len(s) < 100:
+            kind, no, title = g.groups()
+            heading = take_heading()
+            if not heading and kind.lower() == "topic":
+                heading = f"Topic {no}" + (f" – {title.strip()}" if title.strip() else "")
+            start_group("case" if kind.lower() == "testlet" else "set", f"{kind.title()} {no}", heading)
+            continue
+
+        # 沒有 "Testlet N" 標題、直接以 Overview 開始的情境題組
+        if RE_CASE_START.match(ln) and not (group and group.kind == "case" and not group.blocks):
+            start_group("case", "Testlet", take_heading())
+            group.background.append(ln)
+            continue
+
         m = RE_QUESTION.match(ln)
         if m:
             number, topic_no, rest = m.groups()
-            if topic_no:
-                current_topic = topic_no
-                topics.setdefault(topic_no, f"Topic {topic_no}")
-            cur = RawBlock(number=number, topic=current_topic, pages=[page])
-            blocks.append(cur)
+            if topic_no and (group is None or group.label != f"Topic {topic_no}"):
+                start_group("set", f"Topic {topic_no}", f"Topic {topic_no}")
+            elif group is None:
+                start_group("set", "", None)
+            cur = RawBlock(number=number, pages=[page])
+            group.blocks.append(cur)
             if rest.strip():
                 cur.lines.append(rest.strip())
             continue
-        t = RE_TOPIC.match(ln)
-        if t and len(ln) < 100:
-            kind, no, title = t.groups()
-            current_topic = no
-            topics[no] = f"{kind.title()} {no}" + (f" – {title.strip()}" if title.strip() else "")
+
+        # 第一個題組之前的內容（封面等）放入 preamble，僅供取得章節標題
+        holder = cur.lines if cur is not None else group.background if group is not None else preamble
+        holder.append(ln)
+        if s:
+            last = (holder, len(holder) - 1)
+
+    # 未標號的 Testlet：依同章節下一個 Testlet 的編號推算
+    for i, g in enumerate(groups):
+        if g.kind == "case" and g.label == "Testlet":
+            nxt = next((n for n in groups[i + 1:] if n.chapter == g.chapter and n.kind == "case"), None)
+            m = re.match(r"Testlet (\d+)", nxt.label) if nxt else None
+            g.label = f"Testlet {int(m.group(1)) - 1}" if m and int(m.group(1)) > 1 else "Testlet"
+
+    return groups, [{"id": cid, "title": title} for title, cid in chapters.items()]
+
+
+def format_rich(lines: list[str]) -> str:
+    """把情境背景的 PDF 行轉為 RichText：合併斷行、保留清單與小標題，並標出需補的表格。"""
+    entries: list[list[str]] = []  # [kind, text]，kind = para | bullet | heading
+    prev_blank = True
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            prev_blank = True
             continue
-        if cur is not None:
-            cur.lines.append(ln)
-    return blocks, topics
+        b = RE_BULLET.match(s)
+        if b:
+            entries.append(["bullet", s[b.end():].strip()])
+            prev_blank = False
+            continue
+        if entries and entries[-1] == ["bullet", ""]:  # 清單符號與內容分在兩行
+            entries[-1][1] = s
+            continue
+        after_sentence = not entries or entries[-1][1].endswith((".", ":"))
+        if (prev_blank or after_sentence) and looks_like_heading(s) and len(s.split()) <= 7:
+            entries.append(["heading", s])
+        # 句子未結束（常見於跨頁斷行）時，即使中間有空行也接回同一段
+        elif entries and entries[-1][0] in ("para", "bullet") and (
+            not prev_blank or not entries[-1][1].endswith((".", ":", "?", "!"))
+        ):
+            entries[-1][1] += " " + s
+        else:
+            entries.append(["para", s])
+        prev_blank = False
+
+    out: list[str] = []
+    prev = None
+    for kind, text in entries:
+        piece = f"**{text}**" if kind == "heading" else f"- {text}" if kind == "bullet" else text
+        if out:
+            tight = prev == "heading" or (kind == "bullet" and prev == "bullet")
+            out.append("\n" if tight else "\n\n")
+        out.append(piece)
+        if RE_FIGURE.search(text):
+            out.append(f"\n\n{TODO}: 依 PDF 截圖補上表格／圖片內容")
+        prev = kind
+    return "".join(out).strip()
+
+
+def case_sections(lines: list[str]) -> list[dict]:
+    """依 Overview / Existing Environment / Requirements 等主標題切成左欄分頁。"""
+    sections: list[dict] = []
+    buf: list[str] = []
+    title = "Overview"
+    for ln in lines:
+        if ln.strip().lower() in CASE_TABS:
+            if any(x.strip() for x in buf):
+                sections.append({"title": title, "content": format_rich(buf)})
+            title, buf = ln.strip(), []
+            continue
+        buf.append(ln)
+    if any(x.strip() for x in buf):
+        sections.append({"title": title, "content": format_rich(buf)})
+    return sections or [{"title": "Overview", "content": TODO}]
+
+
+def case_title(sections: list[dict], label: str) -> str:
+    first = sections[0]["content"] if sections else ""
+    m = re.match(r"(?:A company named\s+)?(.{2,40}?)\s+(?:is|has)\b", first)
+    return f"{label} · {m.group(1).strip()}" if m else label
 
 
 def parse_answer_letters(raw: str) -> list[str] | None:
@@ -279,82 +432,139 @@ def skeleton(qtype: str, base: dict, parsed: Parsed) -> dict:
     return q
 
 
-def build(blocks: list[RawBlock], has_images: dict[int, bool], pdf_name: str, loose_options: bool, id_prefix: str):
+def analyze_block(b: RawBlock, qid: str, source: dict, has_images: dict[int, bool], loose_options: bool) -> dict:
+    """解析單一題目；reasons 為空代表可直接收錄，否則 question 為待補完的骨架。"""
+    raw_text = "\n".join(b.lines).strip()
+    parsed = dissect(b, loose_options)
+    stem = normalize_text(parsed.stem_lines)
+    explanation = normalize_text(parsed.explanation_lines)
+    urls = list(dict.fromkeys(u.rstrip(".,;") for u in RE_URL.findall(explanation)))
+    base = {
+        "id": qid,
+        "question": stem,
+        "explanation": explanation,
+        **({"references": [{"title": u, "url": u} for u in urls]} if urls else {}),
+        "source": source,
+    }
+
+    markers = detect_markers(raw_text)
+    reasons: list[str] = list(markers)
+    letters = parse_answer_letters(parsed.answer_raw) if parsed.answer_raw is not None else None
+    option_ids = {o["id"] for o in parsed.options}
+    page_has_images = any(has_images.get(p) for p in b.pages)
+
+    if not markers:
+        if len(parsed.options) < 2:
+            reasons.append("NO_OPTIONS")
+        if parsed.answer_raw is None:
+            reasons.append("NO_ANSWER")
+        elif letters is None:
+            reasons.append("ANSWER_NOT_LETTERS")
+        elif not set(letters) <= option_ids:
+            reasons.append("ANSWER_NOT_IN_OPTIONS")
+        if not stem:
+            reasons.append("EMPTY_STEM")
+        want = re.search(r"\b(?:choose|select)\s+(two|three|four|2|3|4)\b", stem, re.I)
+        if letters and want and len(letters) == 1:
+            reasons.append("ANSWER_COUNT_MISMATCH")
+        # 題幹引用表格 / 圖片（或出現截圖造成的大段空白），文字題幹不完整
+        blank_run = re.search(r"\n\s*\n\s*\n\s*\n", "\n".join(parsed.stem_lines))
+        if page_has_images and (RE_FIGURE.search(stem) or blank_run):
+            reasons.append("STEM_IMAGE")
+    if reasons and page_has_images:
+        reasons.append("HAS_IMAGES")
+
+    if not reasons:
+        qtype = "multiple_choice" if len(letters) > 1 else "single_choice"
+        question = {**base, "type": qtype, "options": parsed.options, "answer": letters if len(letters) > 1 else letters[0]}
+    else:
+        qtype = suggest_type(raw_text, markers) if markers else (
+            "multiple_choice" if letters and len(letters) > 1 else "single_choice"
+        )
+        question = skeleton(qtype, base, parsed)
+    return {
+        "reasons": reasons,
+        "suggested_type": qtype,
+        "answer_raw": parsed.answer_raw,
+        "raw_text": raw_text,
+        "question": order_keys(question),
+    }
+
+
+def build(groups: list[Group], has_images: dict[int, bool], pdf_name: str, loose_options: bool, id_prefix: str):
     questions: list[dict] = []
     drafts: list[dict] = []
-    seen: Counter = Counter()
+    used: Counter = Counter()
+    index = 0  # 在 PDF 中的出現順序，題庫一律依此排序
 
-    for b in blocks:
-        seen[(b.topic, b.number)] += 1
-        qid = f"{id_prefix}{'t' + b.topic + '-' if b.topic else ''}{int(b.number):04d}"
-        if seen[(b.topic, b.number)] > 1:
-            qid += f"-{seen[(b.topic, b.number)]}"
+    def unique(qid: str) -> str:
+        used[qid] += 1
+        return qid if used[qid] == 1 else f"{qid}-{used[qid]}"
 
-        raw_text = "\n".join(b.lines).strip()
-        parsed = dissect(b, loose_options)
-        stem = normalize_text(parsed.stem_lines)
-        explanation = normalize_text(parsed.explanation_lines)
-        urls = list(dict.fromkeys(u.rstrip(".,;") for u in RE_URL.findall(explanation)))
-        source = {"file": pdf_name, "number": b.number, "pages": b.pages}
-        base = {
-            "id": qid,
-            "chapter": f"topic{b.topic}" if b.topic else "imported",
-            "question": stem,
-            "explanation": explanation,
-            **({"references": [{"title": u, "url": u} for u in urls]} if urls else {}),
+    for g in groups:
+        if not g.blocks:
+            continue
+        slug = re.sub(r"[^a-z0-9]", "", "".join(w[0] if w.isalpha() else w for w in g.label.lower().split()))
+        prefix = f"{id_prefix}{g.chapter}{'-' + slug if slug else ''}"
+
+        if g.kind != "case":
+            for b in g.blocks:
+                index += 1
+                source = {"file": pdf_name, "index": index, "section": g.label, "number": b.number, "pages": b.pages}
+                r = analyze_block(b, unique(f"{prefix}-q{int(b.number):03d}"), source, has_images, loose_options)
+                q = {**r["question"], "chapter": g.chapter}
+                if not r["reasons"]:
+                    questions.append(order_keys(q))
+                else:
+                    drafts.append({"id": q["id"], "status": "needs_review", **{k: r[k] for k in ("reasons", "suggested_type", "answer_raw")},
+                                   "source": source, "raw_text": r["raw_text"], "question": order_keys(q)})
+            continue
+
+        # 情境題組：背景 + 子題整組處理
+        index += 1
+        case_id = unique(prefix)
+        sections = case_sections(g.background)
+        subs = []
+        for b in g.blocks:
+            source = {"file": pdf_name, "section": g.label, "number": b.number, "pages": b.pages}
+            r = analyze_block(b, unique(f"{case_id}-q{int(b.number)}"), source, has_images, loose_options)
+            subs.append(r)
+        reasons = {"CASE_STUDY"} | {x for r in subs for x in r["reasons"]}
+        if any(TODO in s["content"] for s in sections):
+            reasons.add("BACKGROUND_FIGURE")
+        source = {"file": pdf_name, "index": index, "section": g.label, "pages": g.pages}
+        case = {
+            "id": case_id,
+            "type": "case_study",
+            "chapter": g.chapter,
+            "question": "This is a case study. 請先閱讀左側的情境背景，再回答右側各子題。",
+            "caseInfo": {"title": case_title(sections, g.label), "sections": sections},
+            "questions": [r["question"] for r in subs],
             "source": source,
         }
-
-        reasons: list[str] = []
-        markers = detect_markers(raw_text)
-        reasons += markers
-        letters = parse_answer_letters(parsed.answer_raw) if parsed.answer_raw is not None else None
-        option_ids = {o["id"] for o in parsed.options}
-
-        if not markers:
-            if len(parsed.options) < 2:
-                reasons.append("NO_OPTIONS")
-            if parsed.answer_raw is None:
-                reasons.append("NO_ANSWER")
-            elif letters is None:
-                reasons.append("ANSWER_NOT_LETTERS")
-            elif not set(letters) <= option_ids:
-                reasons.append("ANSWER_NOT_IN_OPTIONS")
-            if not stem:
-                reasons.append("EMPTY_STEM")
-            want = re.search(r"\b(?:choose|select)\s+(two|three|four|2|3|4)\b", stem, re.I)
-            if letters and want and len(letters) == 1:
-                reasons.append("ANSWER_COUNT_MISMATCH")
-        if any(has_images.get(p) for p in b.pages):
-            # 有截圖時文字可能不完整，但標準選擇題仍可先收錄，僅在 draft 中提示
-            if reasons:
-                reasons.append("HAS_IMAGES")
-
-        if not reasons:
-            qtype = "multiple_choice" if len(letters) > 1 else "single_choice"
-            q = {**base, "type": qtype, "options": parsed.options, "answer": letters if len(letters) > 1 else letters[0]}
-            questions.append(order_keys(q))
+        if reasons == {"CASE_STUDY"}:
+            questions.append(order_keys(case))
         else:
-            qtype = suggest_type(raw_text, markers) if markers else (
-                "multiple_choice" if letters and len(letters) > 1 else "single_choice"
-            )
             drafts.append(
                 {
-                    "id": qid,
+                    "id": case_id,
                     "status": "needs_review",
-                    "reasons": reasons,
-                    "suggested_type": qtype,
-                    "answer_raw": parsed.answer_raw,
+                    "reasons": sorted(reasons),
+                    "suggested_type": "case_study",
                     "source": source,
-                    "raw_text": raw_text,
-                    "question": order_keys(skeleton(qtype, base, parsed)),
+                    "raw_text": "\n".join(g.background).strip(),
+                    "subs": [
+                        {"id": r["question"]["id"], **{k: r[k] for k in ("reasons", "suggested_type", "answer_raw", "raw_text")}}
+                        for r in subs
+                    ],
+                    "question": order_keys(case),
                 }
             )
     return questions, drafts
 
 
 KEY_ORDER = ["id", "type", "chapter", "question", "code", "options", "templateType", "template", "blanks",
-             "items", "statements", "caseInfo", "questions", "answer", "explanation", "references", "source"]
+             "items", "statements", "caseInfo", "questions", "answer", "explanation", "reviewNote", "references", "source"]
 
 
 def order_keys(q: dict) -> dict:
@@ -432,16 +642,14 @@ def cmd_parse(args) -> None:
         Path(args.dump_text).write_text("\n".join(lines), encoding="utf-8")
         print(f"已輸出擷取文字：{args.dump_text}")
 
-    blocks, topics = split_blocks(lines)
-    if not blocks:
+    groups, chapters = split_structure(lines)
+    total = sum(len(g.blocks) for g in groups)
+    if not total:
         sys.exit("找不到任何題目。請用 --dump-text 檢查擷取結果，並調整 RE_QUESTION。")
 
-    questions, drafts = build(blocks, has_images, pdf.name, args.loose_options, args.id_prefix)
+    questions, drafts = build(groups, has_images, pdf.name, args.loose_options, args.id_prefix)
 
-    chapter_ids = {q["chapter"] for q in questions} | {d["question"].get("chapter") for d in drafts}
-    chapters = [{"id": f"topic{no}", "title": title} for no, title in sorted(topics.items(), key=lambda x: int(x[0]))]
-    if "imported" in chapter_ids:
-        chapters.append({"id": "imported", "title": "未分類"})
+    chapter_ids = {q["chapter"] for q in questions} | {d["question"]["chapter"] for d in drafts}
     chapters = [c for c in chapters if c["id"] in chapter_ids]
 
     out = Path(args.output)
@@ -461,9 +669,10 @@ def cmd_parse(args) -> None:
     write_json(drafts_path, {"bank": out.name, "drafts": drafts})
 
     reasons = Counter(r for d in drafts for r in d["reasons"])
-    print(f"題目區塊：{len(blocks)}")
-    print(f"  ✔ 已收錄：{len(questions)} → {out}")
-    print(f"  ✎ 待校正：{len(drafts)} → {drafts_path}")
+    cases = sum(1 for g in groups if g.kind == "case" and g.blocks)
+    print(f"題目：{total}（其中 {cases} 組情境題組共 {sum(len(g.blocks) for g in groups if g.kind == 'case')} 題）")
+    print(f"  ✔ 已收錄：{len(questions)} 筆 → {out}")
+    print(f"  ✎ 待校正：{len(drafts)} 筆 → {drafts_path}（情境題組以整組為一筆）")
     for r, n in reasons.most_common():
         print(f"      {r:<22}{n}")
 
@@ -516,6 +725,9 @@ def cmd_merge(args) -> None:
             by_id[q["id"]] = len(bank["questions"])
             bank["questions"].append(q)
         merged += 1
+
+    # 維持與 PDF 相同的題目順序（沒有 source.index 的手動題目排在最後）
+    bank["questions"].sort(key=lambda q: q.get("source", {}).get("index", sys.maxsize))
 
     if not args.dry_run:
         write_json(bank_path, bank)
