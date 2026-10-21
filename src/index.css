@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+@layer base {
+  body { @apply text-slate-800 antialiased; font-family: "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
+}

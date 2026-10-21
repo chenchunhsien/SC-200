@@ -1,0 +1,9 @@
+{
+  "banks": [
+    {
+      "id": "mock",
+      "title": "SC-200 範例題庫",
+      "file": "mock_questions.json"
+    }
+  ]
+}

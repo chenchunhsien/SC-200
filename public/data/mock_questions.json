@@ -1,0 +1,341 @@
+{
+  "id": "mock",
+  "title": "SC-200 範例題庫",
+  "description": "涵蓋單選、複選、KQL 下拉挖空、步驟排序、Yes/No 判斷與情境題組等 SC-200 常見題型的範例資料。",
+  "version": "1.0.0",
+  "chapters": [
+    {
+      "id": "ch1",
+      "title": "Manage a security operations environment",
+      "description": "Microsoft Sentinel 工作區、資料連接器、RBAC 與自動化"
+    },
+    {
+      "id": "ch2",
+      "title": "Configure protections and detections",
+      "description": "Defender XDR / Defender for Endpoint 防護與自訂偵測"
+    },
+    {
+      "id": "ch3",
+      "title": "Manage incident response",
+      "description": "事件調查、回應動作與 Playbook"
+    },
+    {
+      "id": "ch4",
+      "title": "Manage security threats",
+      "description": "KQL 威脅獵捕與 Threat Intelligence"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q001",
+      "type": "single_choice",
+      "chapter": "ch3",
+      "difficulty": "easy",
+      "tags": ["Defender for Endpoint", "Response actions"],
+      "question": "You use Microsoft Defender for Endpoint. A device named **Device1** is suspected of being compromised.\n\nYou need to prevent Device1 from communicating with other devices on the network while still allowing it to report to the Defender for Endpoint service.\n\nWhich response action should you perform?",
+      "options": [
+        { "id": "A", "text": "Run antivirus scan" },
+        { "id": "B", "text": "Isolate device" },
+        { "id": "C", "text": "Restrict app execution" },
+        { "id": "D", "text": "Collect investigation package" }
+      ],
+      "answer": "B",
+      "explanation": "**Isolate device** 會中斷裝置的網路連線，但保留與 Defender for Endpoint 雲端服務的連線，讓分析師仍可持續監控與執行後續動作（例如 Live Response）。\n\n- Restrict app execution：只允許 Microsoft 簽章的程式執行，不會阻斷網路。\n- Collect investigation package：收集鑑識資料，不具隔離效果。",
+      "references": [
+        {
+          "title": "Take response actions on a device",
+          "url": "https://learn.microsoft.com/defender-endpoint/respond-machine-alerts"
+        }
+      ]
+    },
+    {
+      "id": "q002",
+      "type": "single_choice",
+      "chapter": "ch1",
+      "difficulty": "medium",
+      "tags": ["Microsoft Sentinel", "RBAC"],
+      "question": "You have a Microsoft Sentinel workspace.\n\nTier-1 analysts must be able to assign incidents and change incident status. The solution must follow the principle of least privilege.\n\nWhich role should you assign to the analysts?",
+      "options": [
+        { "id": "A", "text": "Microsoft Sentinel Reader" },
+        { "id": "B", "text": "Microsoft Sentinel Responder" },
+        { "id": "C", "text": "Microsoft Sentinel Contributor" },
+        { "id": "D", "text": "Logic App Contributor" }
+      ],
+      "answer": "B",
+      "explanation": "**Microsoft Sentinel Responder** 具備 Reader 的所有權限，並可管理事件（指派、變更狀態與嚴重性、加入註解），但不能建立或修改分析規則等內容，符合最小權限原則。\n\nContributor 權限過大；Reader 無法修改事件；Logic App Contributor 用於管理 Playbook。",
+      "references": [
+        {
+          "title": "Roles and permissions in Microsoft Sentinel",
+          "url": "https://learn.microsoft.com/azure/sentinel/roles"
+        }
+      ]
+    },
+    {
+      "id": "q003",
+      "type": "multiple_choice",
+      "chapter": "ch4",
+      "difficulty": "easy",
+      "tags": ["KQL"],
+      "question": "You are writing Kusto Query Language (KQL) queries in Microsoft Sentinel.\n\nWhich **two** operators can you use to combine rows or columns from two different tables?\n\nEach correct answer presents a complete solution.",
+      "options": [
+        { "id": "A", "text": "join" },
+        { "id": "B", "text": "extend" },
+        { "id": "C", "text": "union" },
+        { "id": "D", "text": "project" },
+        { "id": "E", "text": "summarize" }
+      ],
+      "answer": ["A", "C"],
+      "explanation": "- `join`：依據共同欄位將兩個資料表的資料列「橫向」合併。\n- `union`：將兩個以上資料表的資料列「縱向」串接。\n\n`extend` 新增計算欄位、`project` 選擇欄位、`summarize` 進行彙總，皆只作用於單一輸入資料表。",
+      "references": [
+        {
+          "title": "join operator",
+          "url": "https://learn.microsoft.com/kusto/query/join-operator"
+        },
+        {
+          "title": "union operator",
+          "url": "https://learn.microsoft.com/kusto/query/union-operator"
+        }
+      ]
+    },
+    {
+      "id": "q004",
+      "type": "multiple_choice",
+      "chapter": "ch1",
+      "difficulty": "medium",
+      "tags": ["Microsoft Sentinel", "SOAR"],
+      "question": "You have a Microsoft Sentinel workspace.\n\nWhen a high-severity incident is created, you need to automatically assign the incident to an analyst and post a message to a Microsoft Teams channel.\n\nWhich **two** components should you use?\n\nEach correct answer presents part of the solution.",
+      "options": [
+        { "id": "A", "text": "An automation rule" },
+        { "id": "B", "text": "A playbook" },
+        { "id": "C", "text": "A workbook" },
+        { "id": "D", "text": "A hunting query" },
+        { "id": "E", "text": "A watchlist" }
+      ],
+      "answer": ["A", "B"],
+      "explanation": "**Automation rule** 可在事件建立時依條件觸發，直接執行「指派擁有者」等動作，並可呼叫 **Playbook**。\n\n**Playbook**（以 Azure Logic Apps 為基礎）負責與外部系統整合，例如發送 Teams 訊息。\n\nWorkbook 用於視覺化、Hunting query 用於主動獵捕、Watchlist 用於存放參考資料，皆無法自動回應事件。",
+      "references": [
+        {
+          "title": "Automate threat response with automation rules",
+          "url": "https://learn.microsoft.com/azure/sentinel/automate-incident-handling-with-automation-rules"
+        }
+      ]
+    },
+    {
+      "id": "q005",
+      "type": "dropdown_cloze",
+      "chapter": "ch4",
+      "difficulty": "hard",
+      "tags": ["KQL", "Threat Intelligence"],
+      "question": "You need to identify devices that executed a file whose SHA-256 hash matches a threat intelligence indicator, and return the number of matching processes per device.\n\nHow should you complete the query? Select the appropriate options in the answer area.",
+      "templateType": "code",
+      "template": "let MaliciousHashes = ThreatIntelligenceIndicator\n    | where isnotempty(FileHashValue) and FileHashType == \"SHA256\"\n    | project FileHashValue;\nDeviceProcessEvents\n| where TimeGenerated > ago(7d)\n| {{select_0}} kind=inner (MaliciousHashes) on $left.{{select_1}} == $right.FileHashValue\n| {{select_2}} ProcessCount = count() by DeviceName\n| order by ProcessCount desc",
+      "blanks": [
+        { "id": "select_0", "options": ["join", "union", "extend", "mv-expand"], "answer": "join" },
+        { "id": "select_1", "options": ["SHA256", "SHA1", "MD5", "FileName"], "answer": "SHA256" },
+        { "id": "select_2", "options": ["summarize", "extend", "project", "render"], "answer": "summarize" }
+      ],
+      "explanation": "1. `join kind=inner`：只保留兩邊雜湊值相符的資料列。`union` 只會串接資料列、無法依欄位比對；`extend` 與 `mv-expand` 只作用於單一資料表。\n2. 威脅情資已篩選為 `SHA256`，因此左表要比對 `DeviceProcessEvents` 的 `SHA256` 欄位。\n3. `summarize ... count() by DeviceName`：依裝置彙總數量。",
+      "references": [
+        {
+          "title": "DeviceProcessEvents table",
+          "url": "https://learn.microsoft.com/defender-xdr/advanced-hunting-deviceprocessevents-table"
+        }
+      ]
+    },
+    {
+      "id": "q006",
+      "type": "dropdown_cloze",
+      "chapter": "ch1",
+      "difficulty": "medium",
+      "tags": ["Microsoft Sentinel", "Data connectors"],
+      "question": "Complete the following statements about Microsoft Sentinel by selecting the correct option from each drop-down list.",
+      "templateType": "text",
+      "template": "To collect Windows Security events from Azure virtual machines by using the Azure Monitor Agent, you should configure {{select_0}}.\n\nTo run a playbook automatically whenever a new incident is created, you should create {{select_1}}.",
+      "blanks": [
+        {
+          "id": "select_0",
+          "options": [
+            "the Windows Security Events via AMA connector and a data collection rule",
+            "the Syslog via AMA connector",
+            "a Log Analytics workspace diagnostic setting",
+            "the Common Event Format (CEF) via AMA connector"
+          ],
+          "answer": "the Windows Security Events via AMA connector and a data collection rule"
+        },
+        {
+          "id": "select_1",
+          "options": ["an automation rule", "a workbook", "a hunting query", "a watchlist"],
+          "answer": "an automation rule"
+        }
+      ],
+      "explanation": "- **Windows Security Events via AMA** 連接器會透過資料收集規則（DCR）指定要收集的 VM 與事件集。Syslog / CEF 用於 Linux 或網路設備。\n- 事件建立時觸發 Playbook 應使用 **automation rule**（觸發條件：When incident is created）。",
+      "references": [
+        {
+          "title": "Windows Security Events via AMA connector",
+          "url": "https://learn.microsoft.com/azure/sentinel/data-connectors/windows-security-events-via-ama"
+        }
+      ]
+    },
+    {
+      "id": "q007",
+      "type": "drag_drop_order",
+      "chapter": "ch2",
+      "difficulty": "medium",
+      "tags": ["Defender XDR", "Custom detections"],
+      "question": "You need to create a custom detection rule in Microsoft Defender XDR that generates alerts from an advanced hunting query.\n\nWhich **four** actions should you perform in sequence? Move the appropriate actions from the list of actions to the answer area and arrange them in the correct order.",
+      "items": [
+        { "id": "a", "text": "Run the query in Advanced hunting and verify it returns the required columns (Timestamp, DeviceId, ReportId)" },
+        { "id": "b", "text": "Select Create detection rule" },
+        { "id": "c", "text": "Configure the alert details, including frequency, severity, and MITRE technique" },
+        { "id": "d", "text": "Choose the impacted entities and the automated response actions, then create the rule" },
+        { "id": "e", "text": "Create a watchlist in Microsoft Sentinel" },
+        { "id": "f", "text": "Enable the Fusion analytics rule" }
+      ],
+      "answer": ["a", "b", "c", "d"],
+      "explanation": "自訂偵測規則必須從 **Advanced hunting** 的查詢建立：\n\n1. 先執行並驗證查詢（結果需包含必要欄位，例如 `Timestamp`、`DeviceId`、`ReportId`）。\n2. 點選 **Create detection rule**。\n3. 設定警示名稱、執行頻率、嚴重性與 MITRE 技術。\n4. 指定受影響的實體與回應動作後建立規則。\n\nWatchlist 與 Fusion 屬於 Microsoft Sentinel 功能，與此流程無關。",
+      "references": [
+        {
+          "title": "Create and manage custom detection rules",
+          "url": "https://learn.microsoft.com/defender-xdr/custom-detection-rules"
+        }
+      ]
+    },
+    {
+      "id": "q008",
+      "type": "drag_drop_order",
+      "chapter": "ch1",
+      "difficulty": "easy",
+      "tags": ["Microsoft Sentinel", "Deployment"],
+      "question": "You plan to deploy Microsoft Sentinel and start detecting threats from Microsoft Entra ID sign-in logs.\n\nWhich **four** actions should you perform in sequence?",
+      "items": [
+        { "id": "s1", "text": "Create a Log Analytics workspace" },
+        { "id": "s2", "text": "Add Microsoft Sentinel to the workspace" },
+        { "id": "s3", "text": "Install the Microsoft Entra ID solution from Content hub and connect the data connector" },
+        { "id": "s4", "text": "Enable analytics rules from the installed rule templates" },
+        { "id": "s5", "text": "Create an Azure Automation account" }
+      ],
+      "answer": ["s1", "s2", "s3", "s4"],
+      "explanation": "Microsoft Sentinel 必須建立在 Log Analytics 工作區之上，因此順序為：建立工作區 → 啟用 Sentinel → 從 Content hub 安裝方案並連接資料 → 由範本啟用分析規則。\n\nAzure Automation 帳戶並非部署 Sentinel 的必要步驟。",
+      "references": [
+        {
+          "title": "Onboard Microsoft Sentinel",
+          "url": "https://learn.microsoft.com/azure/sentinel/quickstart-onboard"
+        }
+      ]
+    },
+    {
+      "id": "q009",
+      "type": "statement_matrix",
+      "chapter": "ch1",
+      "difficulty": "medium",
+      "tags": ["Microsoft Sentinel"],
+      "question": "For each of the following statements about Microsoft Sentinel, select **Yes** if the statement is true. Otherwise, select **No**.",
+      "statements": [
+        { "id": "s1", "text": "You can reference a watchlist in a KQL query by using the _GetWatchlist() function.", "answer": true },
+        { "id": "s2", "text": "Microsoft Sentinel playbooks are built on Azure Logic Apps.", "answer": true },
+        { "id": "s3", "text": "Hunting queries automatically generate incidents when they return results.", "answer": false }
+      ],
+      "explanation": "- **Yes**：`_GetWatchlist('alias')` 可在查詢中引用 Watchlist。\n- **Yes**：Playbook 就是 Azure Logic Apps 工作流程。\n- **No**：Hunting query 需由分析師手動執行；要自動產生事件必須使用 **analytics rule**（或將查詢轉為分析規則）。",
+      "references": [
+        {
+          "title": "Use watchlists in Microsoft Sentinel",
+          "url": "https://learn.microsoft.com/azure/sentinel/watchlists-queries"
+        }
+      ]
+    },
+    {
+      "id": "q010",
+      "type": "statement_matrix",
+      "chapter": "ch2",
+      "difficulty": "medium",
+      "tags": ["Defender for Endpoint", "ASR"],
+      "question": "You use Microsoft Defender for Endpoint.\n\nFor each of the following statements, select **Yes** if the statement is true. Otherwise, select **No**.",
+      "statements": [
+        { "id": "s1", "text": "Attack surface reduction (ASR) rules can be configured in Audit mode to evaluate their impact before enforcement.", "answer": true },
+        { "id": "s2", "text": "Isolating a device removes it from Defender for Endpoint management.", "answer": false },
+        { "id": "s3", "text": "With the Full automation level, automated investigation and remediation (AIR) applies remediation actions automatically.", "answer": true }
+      ],
+      "explanation": "- **Yes**：ASR 規則支援 Audit 模式，可先觀察影響再改為 Block。\n- **No**：隔離後裝置仍與 Defender for Endpoint 服務保持連線，可隨時解除隔離。\n- **Yes**：Full - remediate threats automatically 會自動執行修復動作；其他層級則需人工核准。",
+      "references": [
+        {
+          "title": "Attack surface reduction rules overview",
+          "url": "https://learn.microsoft.com/defender-endpoint/attack-surface-reduction"
+        },
+        {
+          "title": "Automation levels in automated investigation and remediation",
+          "url": "https://learn.microsoft.com/defender-endpoint/automation-levels"
+        }
+      ]
+    },
+    {
+      "id": "cs001",
+      "type": "case_study",
+      "chapter": "ch3",
+      "difficulty": "hard",
+      "tags": ["Case study", "Microsoft Sentinel"],
+      "question": "This is a case study. Review the information on the left, then answer each sub-question on the right. You can switch between the information tabs at any time.",
+      "caseInfo": {
+        "title": "Contoso, Ltd.",
+        "sections": [
+          {
+            "title": "Overview",
+            "content": "**Contoso, Ltd.** is a manufacturing company with offices in Taipei and Seattle.\n\nThe company has 2,000 employees and recently established a security operations center (SOC) staffed by Tier-1 and Tier-2 analysts."
+          },
+          {
+            "title": "Environment",
+            "content": "- An Azure subscription named **Sub1** contains a Log Analytics workspace named **Workspace1** with Microsoft Sentinel enabled.\n- All users are licensed for Microsoft 365 E5.\n- 2,000 Windows 11 devices are onboarded to Microsoft Defender for Endpoint.\n- The security team maintains a list of known malicious IP addresses in a CSV file.\n- Contoso has an AWS account that hosts several EC2 instances."
+          },
+          {
+            "title": "Requirements",
+            "content": "**Security requirements**\n- Tier-1 analysts must be able to triage incidents in Microsoft Sentinel but must **not** be able to create or modify analytics rules.\n- An alert must be generated whenever a user signs in from an IP address in the security team's list.\n- Incidents from Microsoft Defender XDR must be available in Microsoft Sentinel.\n\n**Technical requirements**\n- Minimize administrative effort.\n- The IP address list must be updatable without modifying query logic."
+          }
+        ]
+      },
+      "questions": [
+        {
+          "id": "cs001-1",
+          "type": "single_choice",
+          "question": "Which role should you assign to the Tier-1 analysts on Workspace1?",
+          "options": [
+            { "id": "A", "text": "Microsoft Sentinel Reader" },
+            { "id": "B", "text": "Microsoft Sentinel Responder" },
+            { "id": "C", "text": "Microsoft Sentinel Contributor" },
+            { "id": "D", "text": "Security Administrator" }
+          ],
+          "answer": "B",
+          "explanation": "需求為「可處理事件、但不可建立或修改分析規則」，**Microsoft Sentinel Responder** 正好符合。Contributor 可修改分析規則，違反需求。"
+        },
+        {
+          "id": "cs001-2",
+          "type": "dropdown_cloze",
+          "question": "You need to create the analytics rule query that meets the sign-in requirement. How should you complete the query?",
+          "templateType": "code",
+          "template": "let BlockedIPs = {{select_0}}(\"MaliciousIPs\")\n    | project SearchKey;\nSigninLogs\n| where IPAddress {{select_1}} (BlockedIPs)\n| project TimeGenerated, UserPrincipalName, IPAddress, Location",
+          "blanks": [
+            { "id": "select_0", "options": ["_GetWatchlist", "externaldata", "materialize", "toscalar"], "answer": "_GetWatchlist" },
+            { "id": "select_1", "options": ["in", "has", "==", "contains"], "answer": "in" }
+          ],
+          "explanation": "將 CSV 上傳為 **Watchlist**，即可在不修改查詢的情況下更新清單（符合技術需求）。`_GetWatchlist()` 讀取 Watchlist，`SearchKey` 為其索引欄位；`in` 運算子可比對子查詢傳回的值集合。"
+        },
+        {
+          "id": "cs001-3",
+          "type": "statement_matrix",
+          "question": "For each of the following statements, select **Yes** if the statement is true. Otherwise, select **No**.",
+          "statements": [
+            { "id": "s1", "text": "You should use the Microsoft Defender XDR data connector to make Defender XDR incidents available in Microsoft Sentinel.", "answer": true },
+            { "id": "s2", "text": "Users assigned the Microsoft Sentinel Responder role can create analytics rules.", "answer": false },
+            { "id": "s3", "text": "Updating the IP list requires editing the analytics rule query.", "answer": false }
+          ],
+          "explanation": "- **Yes**：Microsoft Defender XDR 連接器可同步事件與警示至 Sentinel。\n- **No**：Responder 不能建立或修改分析規則。\n- **No**：清單存放於 Watchlist，更新 Watchlist 即可，查詢無須變更。"
+        }
+      ],
+      "explanation": "本題組重點：以 **Responder** 角色落實最小權限、以 **Watchlist** 管理可變動的 IOC 清單，並透過 **Microsoft Defender XDR 連接器** 整合事件。",
+      "references": [
+        {
+          "title": "Connect data from Microsoft Defender XDR to Microsoft Sentinel",
+          "url": "https://learn.microsoft.com/azure/sentinel/connect-microsoft-365-defender"
+        }
+      ]
+    }
+  ]
+}
