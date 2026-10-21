@@ -45,7 +45,17 @@ export function clearCustomBank() {
   return run('readwrite', (s) => s.delete(KEY))
 }
 
+/** 單一題目的題數（情境題組以子題計） */
+export const questionUnits = (q) => (q.type === 'case_study' ? q.questions.length : 1)
+
 /** 題數（情境題組以子題計） */
 export function countQuestions(bank) {
-  return bank.questions.reduce((n, q) => n + (q.type === 'case_study' ? q.questions.length : 1), 0)
+  return bank.questions.reduce((n, q) => n + questionUnits(q), 0)
+}
+
+/** 依作答紀錄計算某題答對的題數；舊紀錄沒有子題明細時，以整組對錯推算 */
+export function correctUnits(q, h) {
+  if (q.type !== 'case_study') return h.lastCorrect ? 1 : 0
+  if (!h.subCorrect) return h.lastCorrect ? q.questions.length : 0
+  return q.questions.filter((s) => h.subCorrect[s.id]).length
 }

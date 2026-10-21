@@ -17,6 +17,15 @@ npm run build    # 輸出至 dist/
 
 > 作答紀錄以 `題庫 id::題目 id` 作為 key，存在 localStorage。已發布的題目請勿更改 id。
 
+## 匯入個人題庫（本機上傳 JSON）
+
+真實題庫不進 Git、也不會部署（`.gitignore` 排除 `public/data/sc200.json`、`*.real.json`、`*.drafts.json`，`npm run build` 也會把它們從 `dist/` 移除）。使用方式：
+
+1. 點頁首或首頁的 **匯入個人題庫 (Upload JSON)**，選擇題庫 JSON（例如隨身碟上的 `sc200.json`）。
+2. 匯入前會依 schema 檢查，有錯誤會列出前 8 項且不匯入。
+3. 通過後題庫存在此瀏覽器的 IndexedDB，之後開啟網站會自動優先使用；頁首選單可切回預設範例。
+4. 作答紀錄以題庫的 `id` 欄位區分（沒有則為 `custom`），重新匯入同一份題庫可接續紀錄。換電腦或換瀏覽器需重新匯入。
+
 ## 題庫 JSON Schema
 
 ```jsonc

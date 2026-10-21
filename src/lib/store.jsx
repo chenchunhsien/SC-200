@@ -51,6 +51,10 @@ export function StoreProvider({ children }) {
             lastCorrect: grade.correct,
             lastAnswer: answer ?? null,
             lastAt: now,
+            // 題組另存各子題對錯，首頁統計以子題為單位
+            ...(q.type === 'case_study' && {
+              subCorrect: Object.fromEntries(Object.entries(grade.detail).map(([id, g]) => [id, g.correct])),
+            }),
           },
         }
       })

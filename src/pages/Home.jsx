@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { qKey, useStore } from '../lib/store'
 import { shuffle } from '../lib/grading'
-import { countQuestions } from '../lib/customBank'
+import { correctUnits, countQuestions, questionUnits } from '../lib/customBank'
 
 export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImport, onClearCustom }) {
   const { history, mistakes, starred, progress, resetBank } = useStore()
@@ -29,12 +29,19 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
   const questions = bank.questions
   const stats = useMemo(() => {
     const keys = questions.map((q) => qKey(bank.id, q.id))
-    const tried = keys.filter((k) => history[k])
-    const right = tried.filter((k) => history[k].lastCorrect)
+    // 與題目總數一致，情境題組以子題計
+    let tried = 0
+    let right = 0
+    questions.forEach((q, i) => {
+      const h = history[keys[i]]
+      if (!h) return
+      tried += questionUnits(q)
+      right += correctUnits(q, h)
+    })
     return {
       total: countQuestions(bank),
-      tried: tried.length,
-      accuracy: tried.length ? Math.round((right.length / tried.length) * 100) : null,
+      tried,
+      accuracy: tried ? Math.round((right / tried) * 100) : null,
       mistakes: keys.filter((k) => mistakes[k]).length,
       starred: keys.filter((k) => starred[k]).length,
     }
@@ -130,8 +137,10 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
         <div className="grid gap-3 md:grid-cols-2">
           {bank.chapters.map((ch, i) => {
             const list = questions.filter((q) => q.chapter === ch.id)
-            const done = (bankProgress[ch.id] || []).filter((id) => list.some((q) => q.id === id)).length
-            const pct = list.length ? Math.round((done / list.length) * 100) : 0
+            const doneIds = new Set(bankProgress[ch.id] || [])
+            const size = list.reduce((n, q) => n + questionUnits(q), 0)
+            const done = list.reduce((n, q) => n + (doneIds.has(q.id) ? questionUnits(q) : 0), 0)
+            const pct = size ? Math.round((done / size) * 100) : 0
             return (
               <div key={ch.id} className="flex flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex items-start gap-3">
@@ -152,7 +161,7 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
                     />
                   </div>
                   <span className="w-24 text-right text-xs text-slate-500">
-                    {done} / {list.length} · {pct}%
+                    {done} / {size} · {pct}%
                   </span>
                   <button
                     type="button"
