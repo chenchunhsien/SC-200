@@ -15,7 +15,7 @@
   1. 達採用門檻的 ExamTopics 社群推薦：已確認同一題、總票數 ≥ 10、未四捨五入支持率 ≥ 70%、答案可對應本題；
      無論 Gemini 是否同意、是否有效或 API 是否失敗，都採用社群推薦。
   2. Gemini 有效建議：可不同於題庫答案或官方文件判讀；不因差異降低官方證據等級，也不要求人工複核。
-  3. 單選、多選題：回退為題庫原始答案。其他題型依各自既有格式解析，無效時不套用此回退、不產生推薦。
+  3. 所有題型：Gemini API 失敗或建議無效（依各題型既有格式解析失敗）時，保留題庫原始答案。
 - 官方文件與 Gemini 建議衝突時記錄於 official_conflicts，不因衝突本身降低官方證據等級。
 - 有效引句只代表「引文確實存在於本次證據包的段落中」，不代表答案已被官方文件證實；有效選項也不代表答案已被證實。
 - 官方文件「未提及」某選項不視為反駁；無法排除的干擾選項會列為證據缺口。
@@ -1095,7 +1095,7 @@ RECOMMENDATION_NOTE = "有效選項不代表答案已被證據證實；官方證
 
 COMMUNITY_MIN_VOTES = va.CONSENSUS_MIN_VOTES    # 10
 COMMUNITY_MIN_SHARE = va.CONSENSUS_MIN_SHARE    # 70（%）
-STRATEGY_NOTE = ("考試答案推薦策略：ExamTopics 社群共識 ＞ Gemini 有效建議 ＞（單選、多選）題庫原始答案；"
+STRATEGY_NOTE = ("考試答案推薦策略：ExamTopics 社群共識 ＞ Gemini 有效建議 ＞ 題庫原始答案（所有題型）；"
                  "不代表社群或 Gemini 在技術事實上必然正確。")
 
 
@@ -1236,16 +1236,15 @@ def final_recommendation(unit, packet: dict, ev: dict | None, run_status: str, r
     1. 達採用門檻的 ExamTopics 社群推薦（同一題、≥ 10 票、未四捨五入支持率 ≥ 70%、答案可對應本題）——
        無論 Gemini 是否同意、是否有效或 API 是否失敗；
     2. Gemini 有效建議（依該題型既有格式解析成功），可不同於題庫答案或官方文件判讀；
-    3. 單選、多選：回退為題庫原始答案；其他題型不套用回退，不產生推薦。"""
+    3. 所有題型：Gemini API 失敗或建議無效時，保留題庫原始答案（不另找答案、不增加請求）。"""
     bank = packet["bank_answer"]["value"]
-    choice = unit.type in CHOICE_TYPES
     notices = notice_passages(packet)
     gem_valid = ev is not None and ev.get("status") == "evaluated"
     gem_answer = ev.get("suggested_answer") if gem_valid else None
     gem_status = "valid" if gem_valid else ((ev or {}).get("status") or run_status or "no_result")
     comm = community_recommendation(packet, gem_answer, notices, unit)
     oe = (ev or {}).get("official_evidence_assessment") or {}
-    rec = {"question_type": unit.type, "fallback_rule_applies": choice, "answer": None, "source": None,
+    rec = {"question_type": unit.type, "fallback_rule_applies": True, "answer": None, "source": None,
            "fallback_reason": None, "bank_answer": bank,
            "community": {"answer": comm["answer"], "qualifies": comm["qualifies"],
                          "total_votes": comm["qualification"]["total_votes"],
@@ -1271,14 +1270,9 @@ def final_recommendation(unit, packet: dict, ev: dict | None, run_status: str, r
         rec.update(answer=gem_answer, source="gemini")
     else:
         reason = gem_status
-        if choice:
-            rec.update(answer=bank, source="bank_fallback", fallback_reason=reason)
-            rec["uncertainty"].append(f"沒有達採用門檻的社群推薦，且 Gemini 沒有可對應現有選項的有效建議（{reason}），"
-                                      "最終推薦回退為題庫原始答案")
-        else:
-            rec.update(source="none_invalid_output" if ev is not None else "none_api_failed", fallback_reason=reason)
-            rec["uncertainty"].append(f"沒有達採用門檻的社群推薦，且 Gemini 沒有有效建議（{reason}）；"
-                                      "此題型不套用選項回退規則，未產生推薦")
+        rec.update(answer=bank, source="bank_fallback", fallback_reason=reason)
+        rec["uncertainty"].append(f"沒有達採用門檻的社群推薦，且 Gemini 沒有可對應本題的有效建議（{reason}），"
+                                  "最終推薦回退為題庫原始答案")
     rec["agrees_with_bank"] = va.compare_answers(bank, rec["answer"]) if rec["answer"] is not None else None
     rec["agrees_with_community"] = (va.compare_answers(comm["answer"], rec["answer"])
                                     if comm["answer"] is not None and rec["answer"] is not None else "no_community")

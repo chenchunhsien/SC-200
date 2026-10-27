@@ -867,7 +867,7 @@ check("report has no human-review wording", "人工複核" not in md)
 check("report shows latest run", "\"C\"" in md)
 
 # ---------------------------------------------------------------------------
-# 4. 最終考試推薦：單選／多選的選項對應與回退；其他題型不套用回退
+# 4. 最終考試推薦：各題型的答案解析；Gemini 失敗或無效時所有題型都回退題庫原始答案
 # ---------------------------------------------------------------------------
 
 FR = gj.final_recommendation
@@ -917,16 +917,17 @@ for raw, ok_ in (("AZ", False), ("AA", False), ('["A","E"]', False), ("AC", True
     else:
         check(f"F5 multi {raw!r} invalid → bank fallback", f["source"] == "bank_fallback" and f["answer"] == ["A", "C"])
 
-# 其他題型：不套用選項對應與回退
+# 其他題型：不套用選擇題的寬鬆解析；Gemini 無效或失敗時同樣回退題庫原始答案（使用者決策：無法確定時保留題庫答案）
 f, _ = fin(ust, pkst, rs)
 check("F7 statement valid → gemini", f["source"] == "gemini" and f["answer"] == {"s1": "Yes", "s2": "No"}
-      and f["fallback_rule_applies"] is False)
+      and f["fallback_rule_applies"] is True)
 for bad in ("Yes", '{"s1":"Yes"}', '{"s1":"Maybe","s2":"No"}'):
     rsb = copy.deepcopy(rs)
     rsb["suggested_answer"] = bad
     f, ev_s = fin(ust, pkst, rsb)
-    check(f"F8 statement invalid {bad!r} → no fallback", ev_s["status"] == "invalid_answer" and f["answer"] is None
-          and f["source"] == "none_invalid_output" and f["bank_answer"] == {"s1": "Yes", "s2": "No"})
+    check(f"F8 statement invalid {bad!r} → bank fallback", ev_s["status"] == "invalid_answer"
+          and f["answer"] == {"s1": "Yes", "s2": "No"} and f["source"] == "bank_fallback"
+          and f["fallback_reason"] == "invalid_answer" and f["bank_answer"] == {"s1": "Yes", "s2": "No"})
 
 
 def synth_packet(bank_value):
@@ -946,7 +947,8 @@ check("F7 dropdown valid differs → gemini", f["source"] == "gemini" and f["ans
       and f["agrees_with_bank"] == "disagree")
 for bad in ('{"select_0":"merge"}', "union", '{"select_1":"join"}'):
     f, _ = fin(udd, pdd, dict(base_dd, suggested_answer=bad))
-    check(f"F8 dropdown invalid {bad!r} → no fallback", f["answer"] is None and f["source"] == "none_invalid_output")
+    check(f"F8 dropdown invalid {bad!r} → bank fallback", f["answer"] == {"select_0": "join"} and f["source"] == "bank_fallback"
+          and f["fallback_reason"] == "invalid_answer")
 DG = {"id": "m-dg", "type": "drag_drop_order", "question": "Order the steps.",
       "items": [{"id": "a", "text": "Step one"}, {"id": "b", "text": "Step two"}], "answer": ["a", "b"]}
 udg = gj.eq.Unit("m-dg", "m-dg", "drag_drop_order", DG)
@@ -957,7 +959,8 @@ f, _ = fin(udg, pdg, dict(base_dg, suggested_answer='["b","a"]'))
 check("F7 drag valid → gemini", f["source"] == "gemini" and f["answer"] == ["b", "a"])
 for bad in ('["a","z"]', "ba", "b,a"):
     f, _ = fin(udg, pdg, dict(base_dg, suggested_answer=bad))
-    check(f"F8 drag invalid {bad!r} → no fallback (no choice leniency)", f["answer"] is None and f["source"] == "none_invalid_output")
+    check(f"F8 drag invalid {bad!r} → bank fallback (no choice leniency)", f["answer"] == ["a", "b"] and f["source"] == "bank_fallback"
+          and f["fallback_reason"] == "invalid_answer")
 
 # API 失敗：直接以 final_recommendation 驗證各種狀態
 for st in ("deferred", "rate_limited", "fatal", "invalid_output"):
@@ -967,7 +970,8 @@ for st in ("deferred", "rate_limited", "fatal", "invalid_output"):
     f = FR(us, pk_noet, None, st, None)
     check(f"F6 single {st} + no community → bank fallback", f["source"] == "bank_fallback" and f["answer"] == "B" and f["fallback_reason"] == st)
     f = FR(ust, pkst, None, st, None)
-    check(f"F9 statement {st} → no fallback", f["answer"] is None and f["source"] == "none_api_failed" and f["fallback_reason"] == st)
+    check(f"F9 statement {st} → bank fallback", f["answer"] == {"s1": "Yes", "s2": "No"} and f["source"] == "bank_fallback"
+          and f["fallback_reason"] == st)
 
 # 實際 --run 紀錄中的最終推薦（e1：503、e2：429、e3：401、e4：invalid_output / invalid_answer）
 # M-B：達門檻的社群題不會送出 API（見第 12 節），因此 e1～e4 的 m-single 改為未達門檻（9 票）。
@@ -978,8 +982,8 @@ check("run 200 single (community below threshold) → gemini", r1["m-single"]["r
       and r1["m-single"]["runs"][0]["final_exam_recommendation"]["community"]["qualifies"] is False)
 check("run 503 multi → bank fallback", r1["m-multi"]["runs"][0]["final_exam_recommendation"]["answer"] == ["A", "C"]
       and r1["m-multi"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback")
-check("run 503 statement → no fallback", r1["m-stmt"]["runs"][0]["final_exam_recommendation"]["source"] == "none_api_failed"
-      and r1["m-stmt"]["runs"][0]["final_exam_recommendation"]["answer"] is None)
+check("run 503 statement → bank fallback", r1["m-stmt"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback"
+      and r1["m-stmt"]["runs"][0]["final_exam_recommendation"]["answer"] == {"s1": "Yes", "s2": "No"})
 f2 = results(e2)["questions"]["m-single"]["runs"][0]["final_exam_recommendation"]
 check("run 429 single + community below threshold → bank fallback", f2["source"] == "bank_fallback" and f2["gemini_status"] == "rate_limited"
       and f2["fallback_reason"] == "rate_limited")
@@ -990,7 +994,8 @@ check("run invalid_output single + community below threshold → bank fallback",
       r4["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback"
       and r4["m-single"]["runs"][0]["final_exam_recommendation"]["gemini_status"] == "invalid_output")
 check("run invalid_answer multi → bank fallback", r4["m-multi"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback")
-check("run invalid statement → no fallback", r4["m-stmt"]["runs"][0]["final_exam_recommendation"]["source"] == "none_invalid_output")
+check("run invalid statement → bank fallback", r4["m-stmt"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback"
+      and r4["m-stmt"]["runs"][0]["final_exam_recommendation"]["answer"] == {"s1": "Yes", "s2": "No"})
 check("bank never modified by runs", json.loads(e1.bank.read_text(encoding="utf-8")) == BANK)
 
 # 官方文件角色、推薦依據、產品變更未分析仍採用有效建議
@@ -1030,7 +1035,9 @@ check("F15 reevaluate adds final (invalid Gemini, qualifying community → commu
       rr[1]["final_exam_recommendation"]["source"] == "community" and rr[1]["final_exam_recommendation"]["answer"] == "B"
       and rr[0] == orig2)
 md_fail = gj.render_report(results(e1))
-check("report: API failure shows no-fallback for statement", "此題型不套用回退" in md_fail and "回退為題庫原始答案" in md_fail)
+sec_stmt = md_fail.split("## m-stmt")[1].split("\n## ")[0]
+check("report: API failure shows bank fallback for statement", "此題型不套用回退" not in md_fail
+      and '最終考試推薦：{"s1": "Yes", "s2": "No"}' in sec_stmt and "回退為題庫原始答案（deferred）" in sec_stmt, sec_stmt[:400])
 check("report: old record without final handled", "舊版紀錄未產生" in gj.render_report(
     {"questions": {"x": {"runs": [dict(orig2, evaluation=None)]}}}))
 
@@ -1103,7 +1110,8 @@ check("T9 no qualifying community + Gemini valid → gemini", f["source"] == "ge
 f = FR(us, pk_noet, None, "deferred", None)
 check("T10 no qualifying community + API failure (single) → bank fallback", f["source"] == "bank_fallback" and f["answer"] == "B")
 f = FR(ust, pkst, None, "deferred", None)
-check("T10b no community + API failure (statement) → empty", f["source"] == "none_api_failed" and f["answer"] is None)
+check("T10b no community + API failure (statement) → bank fallback", f["source"] == "bank_fallback"
+      and f["answer"] == {"s1": "Yes", "s2": "No"} and f["fallback_reason"] == "deferred")
 # 11～14：官方文件衝突與既有品質規則
 r = single_result(pk_noet)
 r["option_analysis"][1]["citations"].append(cite(pk_noet, "Sentinel stores SigninLogs data in the workspace table", "refutes_option"))
@@ -1211,7 +1219,8 @@ check("qualifying + Gemini differs → community", fin(us, p70, gem_valid_c)[0][
 check("qualifying + API failure → community", FR(us, p70, None, "deferred", None)["source"] == "community")
 check("69.5% + Gemini valid → gemini", fin(us, p695, gem_valid_c)[0]["answer"] == "C")
 check("69.5% + API failure (single) → bank fallback", FR(us, p695, None, "deferred", None)["source"] == "bank_fallback")
-check("69.5% + API failure (statement) → empty", FR(ust, pkst, None, "deferred", None)["answer"] is None)
+check("69.5% + API failure (statement) → bank fallback", FR(ust, pkst, None, "deferred", None)["answer"] == {"s1": "Yes", "s2": "No"}
+      and FR(ust, pkst, None, "deferred", None)["source"] == "bank_fallback")
 
 # 證據包與雜湊不受影響
 before_pkt = gj.canonical(p695)
@@ -2891,6 +2900,32 @@ try:
     check("MB9 audit counts the community record as completed", st_b["m-single"] == "completed", (st_b.get("m-single"), why_b.get("m-single")))
 finally:
     gj.eq.load_api_key = real_load_key
+
+# ===========================================================================
+# 13. 使用者決策：無法透過 Gemini 確定時保留題庫答案（所有題型）；優先順序不變
+# ===========================================================================
+check("R0 TYPES_BANK covers all five supported types", {u.type for u in TU.values()} == set(gj.ANSWER_FORMATS))
+for qid, u in TU.items():
+    a = va.answer_of(u)
+    pkt = mkpkt(u)  # 目前版本、快照已驗證、沒有社群資料
+    for st in ("deferred", "rate_limited", "fatal", "invalid_output"):
+        f = FR(u, pkt, None, st, None)
+        check(f"R1 {qid} ({u.type}) API {st} → bank answer kept", f["source"] == "bank_fallback" and f["answer"] == a
+              and f["fallback_reason"] == st and f["fallback_rule_applies"] is True and f["agrees_with_bank"] == "agree", f)
+    f = FR(u, pkt, {"status": "invalid_answer"}, "invalid_answer", None)
+    check(f"R2 {qid} ({u.type}) Gemini invalid → bank answer kept", f["source"] == "bank_fallback" and f["answer"] == a
+          and f["fallback_reason"] == "invalid_answer", f)
+    f = FR(u, pkt, {"status": "evaluated", "suggested_answer": a}, "done", {"recommendation_basis": "model_inference"})
+    check(f"R3 {qid} ({u.type}) Gemini valid → gemini (priority over bank unchanged)", f["source"] == "gemini" and f["answer"] == a
+          and f["fallback_reason"] is None, f)
+    pc = mkpkt(u, vote_ex(a, None, 100, 20))  # 達門檻的社群推薦（已記錄、無分布）
+    for ev_, st in ((None, "deferred"), ({"status": "invalid_answer"}, "invalid_answer"),
+                    ({"status": "evaluated", "suggested_answer": a}, "done")):
+        f = FR(u, pc, ev_, st, None)
+        check(f"R4 {qid} ({u.type}) qualifying community wins ({st})", f["source"] == "community" and f["answer"] == a
+              and f["fallback_reason"] is None, f)
+check("R5 strategy note states bank fallback for all types", "題庫原始答案（所有題型）" in gj.STRATEGY_NOTE)
+check("R6 versions unchanged", (gj.PROMPT_VERSION, gj.EVALUATOR_VERSION) == ("judge-v4", "eval-v5"))
 
 # ---- 全域確認 ----
 va.DEFAULT_OUT = real_default_out
