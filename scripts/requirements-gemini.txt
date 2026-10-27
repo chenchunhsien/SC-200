@@ -1,0 +1,3 @@
+# 題目解析工具（scripts/enrich_questions.py --estimate / --run）所需套件
+google-genai
+python-dotenv

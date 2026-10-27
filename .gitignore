@@ -11,3 +11,5 @@ __pycache__/
 public/data/*.drafts.json
 public/data/sc200.json
 public/data/*.real.json
+# Gemini 解析輸出（含真實題目內容，僅存本機）
+output/
