@@ -14,9 +14,11 @@ verification.json），把盤點結果寫入一個全新的報告目錄（--out�
   2. completed        工作區最新證據包驗證通過，且有符合 gemini_judge.completed_run() 的紀錄
                       （API 呼叫、done、核對成功、有最終推薦，證據包雜湊／模型／prompt 版本／判定版本一致）。
   3. blocked          題目資料不完整，或缺少可用證據包（不存在、無法讀取、雜湊不符、題號不符、
-                      dry-run 後題庫或題庫答案已變更），或工作區未通過 --run 前置檢查而無法補跑。
-  4. needs_rejudge    證據包可用，但只有與目前條件不一致的成功紀錄（舊版本、其他模型、舊證據包，
-                      或僅有離線重核）。需以 --run --force 重新判定。
+                      dry-run 後題庫或題庫答案已變更、證據包為舊版 v1 或版本不明），或工作區未通過
+                      --run 的前置檢查（gemini_judge.mode_preflight("run")：路徑、快照與 .gitignore 排除）而無法補跑。
+                      舊版或版本不明的證據包即使加 --force 也會被 --run 拒絕，需在新的空白工作區重新 dry-run。
+  4. needs_rejudge    證據包為目前版本且工作區可執行，但只有與目前條件不一致的成功紀錄（舊版本、其他模型、
+                      舊證據包，或僅有離線重核）。需以 --run --force 重新判定。
   5. failed_retryable 證據包可用，只有失敗紀錄（API 失敗、無效輸出、無效答案等）。
   6. pending          證據包可用，尚無任何判讀紀錄。
 
@@ -46,6 +48,11 @@ STATUSES = ("completed", "pending", "failed_retryable", "needs_rejudge", "blocke
 DIFFERENCES_FROM_RUN = [
     "盤點以 --model（預設 gemini-3.1-flash-lite）判斷模型一致性；--run 以當次指定的 --model 判斷。",
     "盤點即使工作區未通過 --run 前置檢查，仍會把已有一致成功紀錄的題目計為 completed；--run 則會在前置檢查失敗時直接拒絕執行。",
+    "盤點與 --run 使用同一個工作區前置檢查（gemini_judge.mode_preflight(\"run\")，含 .gitignore 排除）；"
+    "工作區未通過時，pending／failed_retryable／needs_rejudge 一律改列 blocked。",
+    "已完成的題目不論證據包版本都計為 completed（--run 同樣直接略過）；未完成的題目若證據包為舊版 v1 或版本不明，"
+    "列為 blocked——--run（含 --force）會拒絕送出這類證據包。",
+    "--run 只要同批任一題的證據包不可送出，就整批拒絕；盤點逐題分類，請勿把 blocked 的題目與可補跑題目放在同一批。",
     "status=done 卻沒有成功核對結果的紀錄，盤點列為 review_required；completed_run() 只會略過這類紀錄。",
     "盤點對所有題目分類；--run 只處理 --ids 指定的題目（每次最多 5 題）。",
 ]
@@ -98,12 +105,19 @@ def packet_state(packet_dir: Path, unit, bank_sha: str) -> dict:
         return {**info, "status": "stale_bank"}
     if (packet.get("bank_answer") or {}).get("value") != va.answer_of(unit):
         return {**info, "status": "bank_answer_changed"}
-    return {**info, "status": "ok"}
+    # 與 --run 相同的世代判斷（gemini_judge.packet_reuse_problems）：只有 current 可再次送出
+    return {**info, "status": "ok", "generation": gj.packet_generation(packet), "packet_version": packet.get("packet_version")}
 
 
 PACKET_REASONS = {"missing": "缺少證據包（需先 dry-run）", "unreadable": "證據包無法讀取", "hash_mismatch": "證據包雜湊不符",
                   "question_mismatch": "證據包題號不符", "stale_bank": "dry-run 後題庫已變更（需重新 dry-run）",
                   "bank_answer_changed": "dry-run 後題庫答案已變更（需重新 dry-run）"}
+GENERATION_REASONS = {"legacy": "證據包為舊版（packet_version 1）", "unknown": "證據包版本不明"}
+
+
+def generation_reason(pkt: dict) -> str:
+    return (f"{GENERATION_REASONS.get(pkt.get('generation'), '證據包版本不受支援')}（packet_version={pkt.get('packet_version')}），"
+            "--run（含 --force）會拒絕送出；需在新的空白工作區重新 dry-run")
 
 
 def run_anomalies(entry) -> list[str]:
@@ -162,6 +176,13 @@ def classify(unit, entry, pkt: dict, model: str, unit_err: str | None, dup: bool
     if pkt["status"] != "ok":
         detail.update(status="blocked", reasons=[PACKET_REASONS.get(pkt["status"], pkt["status"])])
         return detail
+    # 以下各狀態都代表「可以（或需要）再送出」：順序同 --run——已完成者先略過，其餘需目前版本的證據包與可執行的工作區
+    if pkt.get("generation") != "current":
+        detail.update(status="blocked", reasons=[generation_reason(pkt)])
+        return detail
+    if workspace_problems:
+        detail.update(status="blocked", reasons=["工作區未通過 --run 前置檢查：" + "；".join(workspace_problems)])
+        return detail
     successes = [r for r in runs if isinstance(r.get("evaluation"), dict) and r["evaluation"].get("status") == "evaluated"]
     if successes:
         why = set()
@@ -179,9 +200,6 @@ def classify(unit, entry, pkt: dict, model: str, unit_err: str | None, dup: bool
             if not isinstance(r.get("final_exam_recommendation"), dict):
                 why.add("成功紀錄缺少最終推薦（舊版）")
         detail.update(status="needs_rejudge", reasons=sorted(why) or ["成功紀錄不符合目前條件"])
-        return detail
-    if workspace_problems:
-        detail.update(status="blocked", reasons=["工作區未通過 --run 前置檢查：" + "；".join(workspace_problems)])
         return detail
     if runs:
         detail.update(status="failed_retryable",
@@ -207,7 +225,8 @@ def audit(bank_path: Path, workspace: Path, model: str) -> dict:
         except (OSError, UnicodeDecodeError, ValueError) as err:
             results_error = f"{type(err).__name__}: {err}"[:200]
             results = {"questions": {}}
-    workspace_problems = gj.run_preflight(workspace)
+    # 與 --run 完全相同的工作區前置檢查（路徑、快照、.gitignore 排除）；只執行唯讀的 git 查詢，不寫入、不取得工作區鎖
+    workspace_problems = gj.mode_preflight("run", workspace, bank_path)
     packet_dir = workspace / "gemini_judge" / "packets"
     seen, details = set(), []
     for u in units:
@@ -275,7 +294,7 @@ def render_summary(rep: dict, others: list[dict]) -> str:
          "## 狀態總覽", "", "| 狀態 | 題數 | 比例 | 說明 |", "|---|---|---|---|"]
     desc = {"completed": "有符合目前設定的有效成功紀錄", "pending": "證據包可用、尚無紀錄（可安全補跑）",
             "failed_retryable": "證據包可用、只有失敗紀錄（可安全補跑）", "needs_rejudge": "只有不符目前條件的成功紀錄（需 --force 重判）",
-            "blocked": "缺題目資料／證據包，或工作區無法執行（不能直接補跑）", "review_required": "紀錄異常或矛盾（需人工檢視）"}
+            "blocked": "缺題目資料／證據包、證據包為舊版或版本不明，或工作區無法執行（不能直接補跑）", "review_required": "紀錄異常或矛盾（需人工檢視）"}
     for s in STATUSES:
         L.append(f"| `{s}` | {c[s]} | {pct(c[s], t)} | {desc[s]} |")
     L += [f"| **合計** | **{sum(c.values())}** | | 應等於獨立判讀單位 {t}：{'✅ 一致' if sum(c.values()) == t else '❌ 不一致'} |", "",
@@ -303,7 +322,8 @@ def render_summary(rep: dict, others: list[dict]) -> str:
     L += ["", "## 建議", "",
           "- 先處理 review_required，再處理 blocked（多數為缺少證據包，需在同一工作區先 dry-run）。",
           "- pending／failed_retryable 可在同一工作區以 `--run`（每次最多 5 題）補跑；已完成者會自動跳過。",
-          "- needs_rejudge 需明確加 `--force` 重新判定。", ""]
+          "- needs_rejudge 需明確加 `--force` 重新判定（只列出證據包為目前版本、工作區可執行的題目）。",
+          "- 證據包為舊版 v1 或版本不明而 blocked 的題目，加 `--force` 也無法送出，需在新的空白工作區重新 dry-run。", ""]
     return "\n".join(L)
 
 

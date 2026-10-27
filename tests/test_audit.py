@@ -4,10 +4,12 @@ import hashlib
 import io
 import json
 import socket
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT = Path(r"D:\SC-200-platform")
 sys.path.insert(0, str(PROJECT / "scripts"))
@@ -15,6 +17,16 @@ import audit_judge_progress as ap  # noqa: E402
 
 gj, va, eq = ap.gj, ap.va, ap.eq
 PASSED, FAILED = [], []
+
+# 盤點與 --run 共用 gemini_judge.mode_preflight("run")，工作區必須位於受 .gitignore 排除的位置。
+# 與 test_judge.py 相同的慣例：在系統暫存區建立臨時 Git 儲存庫，所有測試暫存目錄放在其受排除的 tmp/ 底下。
+# 不碰專案的 Git 儲存庫；不連網。
+REAL_TEMP = Path(tempfile.gettempdir())
+GIT_ROOT = Path(tempfile.mkdtemp(prefix="audit-gitroot-"))
+subprocess.run(["git", "init", "-q", str(GIT_ROOT)], check=True)
+(GIT_ROOT / ".gitignore").write_text("tmp/\n", encoding="utf-8")
+(GIT_ROOT / "tmp").mkdir()
+tempfile.tempdir = str(GIT_ROOT / "tmp")
 
 
 def check(name, cond, detail=""):
@@ -44,8 +56,16 @@ BANK = {"questions": [
 UNIQUE_UNITS = 17  # 16 個一般根題（u-dup 出現兩次，只計一次 → 15）＋ 2 個案例子題；案例題本身不計
 
 
-def make_env(include_verification=True):
-    d = Path(tempfile.mkdtemp(prefix="audit-"))
+def v2(pkt):
+    """把合成證據包補成目前版本（gj.packet_generation() == "current"），--run 才會接受送出。"""
+    return dict(pkt, **gj.PACKET_VERSIONS, created_at="2026-10-27T00:00:00+00:00", snapshot_sha256="s" * 64,
+                snapshot_schema_version=va.SCHEMA_VERSION,
+                snapshot_trust={"rules_version": gj.SNAPSHOT_TRUST_VERSION, "level": "verified", "reasons": []},
+                microsoft_learn=dict(pkt.get("microsoft_learn") or {}, fetch_log=[]))
+
+
+def make_env(include_verification=True, base=None):
+    d = Path(tempfile.mkdtemp(prefix="audit-", dir=base))
     bank = d / "bank.json"
     bank.write_text(json.dumps(BANK), encoding="utf-8")
     ws = d / "ws"
@@ -58,8 +78,8 @@ def make_env(include_verification=True):
     shas = {}
     for qid in ("u-done", "u-pending", "u-fail", "u-oldver", "u-oldpacket", "u-tamper", "u-stale", "u-review", "u-badruns",
                 "u-history", "u-offline", "u-legacy", "u-dup", "c1-a", "c1-b"):
-        pkt = {"question_id": qid, "bank_sha256": "0" * 64 if qid == "u-stale" else bank_sha,
-               "bank_answer": {"value": va.answer_of(units[qid])}, "examtopics": {}, "microsoft_learn": {"documents": []}}
+        pkt = v2({"question_id": qid, "bank_sha256": "0" * 64 if qid == "u-stale" else bank_sha,
+                  "bank_answer": {"value": va.answer_of(units[qid])}, "examtopics": {}, "microsoft_learn": {"documents": []}})
         path, sha = gj.save_packet(pdir, pkt)
         shas[qid] = sha
         if qid == "u-tamper":
@@ -146,6 +166,7 @@ finally:
     socket.socket, eq.make_client, eq.load_api_key = real_socket, real_make_client, real_load_key
 check("audit rc 0", rc == 0, log)
 check("no API / no client / no key / no network", calls == [], calls)
+check("ignored workspace passes the same preflight as --run", gj.mode_preflight("run", ws, bank) == [])
 check("input SHA256 unchanged", tree_hashes(bank, ws) == before)
 
 rep = json.loads((out / "progress_detail.json").read_text(encoding="utf-8"))
@@ -217,6 +238,8 @@ rep3 = json.loads((d3 / "report" / "progress_detail.json").read_text(encoding="u
 st3 = {u["id"]: u["status"] for u in rep3["units"]}
 check("workspace not runnable → pending/failed become blocked", st3["u-pending"] == "blocked" and st3["u-fail"] == "blocked"
       and st3["u-done"] == "completed" and rep3["workspace"]["preflight_problems"], st3)
+check("workspace not runnable → needs_rejudge also blocked (--run --force would be refused)",
+      all(st3[q] == "blocked" for q in ("u-oldver", "u-oldpacket", "u-offline", "u-legacy")) and rep3["counts"]["needs_rejudge"] == 0, st3)
 check("not runnable: sums still match", sum(rep3["counts"].values()) == rep3["total"] == UNIQUE_UNITS)
 
 d4 = Path(tempfile.mkdtemp(prefix="audit-empty-"))
@@ -253,6 +276,143 @@ rc, log = run_audit(bank6, ws6, d6 / "report")
 rep6 = json.loads((d6 / "report" / "progress_detail.json").read_text(encoding="utf-8"))
 check("no results file → no completed, packets → pending", rc == 0 and rep6["counts"]["completed"] == 0
       and {u["id"]: u["status"] for u in rep6["units"]}["u-done"] == "pending")
+
+# ---------------------------------------------------------------------------
+# H2：盤點與 --run 的資格一致性（證據包世代、Git 排除）
+# ---------------------------------------------------------------------------
+
+
+def ids_in(out_dir, name):
+    return sorted(x for x in (out_dir / name).read_text(encoding="utf-8").splitlines() if x and not x.startswith("#"))
+
+
+def runnable_problems(bank_path, ws_dir, rep_):
+    """--run 的實際送出條件：對每個被列為可補跑或需重判的題目，呼叫 gemini_judge.packet_reuse_problems()。"""
+    bank_obj = json.loads(Path(bank_path).read_text(encoding="utf-8"))
+    ctx = SimpleNamespace(bank_sha=eq.sha256_file(bank_path), units={u.question_id: u for u in eq.iter_units(bank_obj)})
+    out = {}
+    for u in rep_["units"]:
+        if u["status"] in ("pending", "failed_retryable", "needs_rejudge"):
+            packet, _, ok = gj.load_packet(gj.latest_packet(ws_dir / "gemini_judge" / "packets", u["id"]))
+            probs = ([] if ok else ["hash"]) + gj.packet_reuse_problems(packet, ctx, u["id"])
+            if probs:
+                out[u["id"]] = probs
+    return out
+
+
+check("main scenario: every pending / failed / needs_rejudge item passes --run's packet check",
+      runnable_problems(bank, ws, rep) == {}, runnable_problems(bank, ws, rep))
+
+# 證據包世代
+VBANK = {"questions": [single(q) for q in ("v-cur-pending", "v-leg-pending", "v-unk-pending", "v-leg-done",
+                                             "v-leg-oldsuccess", "v-leg-failed", "v-cur-oldsuccess")]}
+dv = Path(tempfile.mkdtemp(prefix="audit-version-"))
+bankv = dv / "bank.json"
+bankv.write_text(json.dumps(VBANK), encoding="utf-8")
+wsv = dv / "ws"
+pdirv = wsv / "gemini_judge" / "packets"
+pdirv.mkdir(parents=True)
+(wsv / "verification.json").write_text(json.dumps({"meta": {}, "questions": {}}), encoding="utf-8")
+bank_sha_v = eq.sha256_file(bankv)
+shav = {}
+for qid in (q["id"] for q in VBANK["questions"]):
+    base_pkt = {"question_id": qid, "bank_sha256": bank_sha_v, "bank_answer": {"value": "A"}, "examtopics": {},
+                "microsoft_learn": {"documents": []}}
+    if qid.startswith("v-cur"):
+        pkt = v2(base_pkt)
+    elif qid.startswith("v-leg"):
+        pkt = dict(base_pkt, packet_version=1)  # 舊版 v1：沒有快照來源與擷取紀錄
+    else:
+        pkt = base_pkt  # 沒有 packet_version：版本不明
+    _, shav[qid] = gj.save_packet(pdirv, pkt)
+old = {"prompt_version": "judge-v2", "evaluation": {"status": "evaluated", "evaluator_version": "eval-v3"}}
+(wsv / "gemini_judgments.json").write_text(json.dumps({"meta": {}, "questions": {
+    "v-leg-done": {"runs": [good_run(shav["v-leg-done"])]},
+    "v-leg-oldsuccess": {"runs": [good_run(shav["v-leg-oldsuccess"], **old)]},
+    "v-leg-failed": {"runs": [fail_run("deferred", shav["v-leg-failed"])]},
+    "v-cur-oldsuccess": {"runs": [good_run(shav["v-cur-oldsuccess"], **old)]},
+}}), encoding="utf-8")
+wsv_before = tree_hashes(bankv, wsv)
+rc, log = run_audit(bankv, wsv, dv / "report")
+repv = json.loads((dv / "report" / "progress_detail.json").read_text(encoding="utf-8"))
+stv = {u["id"]: u["status"] for u in repv["units"]}
+whyv = {u["id"]: "；".join(u["reasons"]) for u in repv["units"]}
+check("version env: audit rc 0, workspace runnable", rc == 0 and repv["workspace"]["preflight_problems"] == [], log)
+check("H2 current packet, no runs → pending", stv["v-cur-pending"] == "pending", whyv["v-cur-pending"])
+check("H2 v1 packet, no runs → blocked (not pending)", stv["v-leg-pending"] == "blocked"
+      and "舊版" in whyv["v-leg-pending"] and "packet_version=1" in whyv["v-leg-pending"], whyv["v-leg-pending"])
+check("H2 unknown-version packet → blocked", stv["v-unk-pending"] == "blocked" and "版本不明" in whyv["v-unk-pending"],
+      whyv["v-unk-pending"])
+check("H2 v1 packet with consistent success → still completed (same as --run skip)", stv["v-leg-done"] == "completed"
+      and gj.completed_run(json.loads((wsv / "gemini_judgments.json").read_text(encoding="utf-8"))["questions"]["v-leg-done"]["runs"],
+                           shav["v-leg-done"], "gemini-3.1-flash-lite") is not None, whyv["v-leg-done"])
+check("H2 v1 packet with only old-version success → blocked, not needs_rejudge (--force cannot send it)",
+      stv["v-leg-oldsuccess"] == "blocked" and "--force" in whyv["v-leg-oldsuccess"]
+      and "重新 dry-run" in whyv["v-leg-oldsuccess"], whyv["v-leg-oldsuccess"])
+check("H2 v1 packet with only failures → blocked, not failed_retryable", stv["v-leg-failed"] == "blocked")
+check("H2 current packet with old-version success → needs_rejudge", stv["v-cur-oldsuccess"] == "needs_rejudge")
+check("H2 pending_ids lists only the current-version packet", ids_in(dv / "report", "pending_ids.txt") == ["v-cur-pending"],
+      ids_in(dv / "report", "pending_ids.txt"))
+check("H2 needs_rejudge_ids excludes unsupported packets", ids_in(dv / "report", "needs_rejudge_ids.txt") == ["v-cur-oldsuccess"],
+      ids_in(dv / "report", "needs_rejudge_ids.txt"))
+brv = {x.split("\t")[0]: x for x in ids_in(dv / "report", "blocked_review_ids.txt")}
+check("H2 blocked list carries the version reason", all(q in brv and "重新 dry-run" in brv[q]
+                                                      for q in ("v-leg-pending", "v-unk-pending", "v-leg-oldsuccess", "v-leg-failed")), brv)
+check("H2 packet generation recorded in detail", {u["id"]: u["packet"].get("generation") for u in repv["units"]}
+      == {"v-cur-pending": "current", "v-leg-pending": "legacy", "v-unk-pending": "unknown", "v-leg-done": "legacy",
+          "v-leg-oldsuccess": "legacy", "v-leg-failed": "legacy", "v-cur-oldsuccess": "current"})
+check("H2 every runnable item passes --run's packet check", runnable_problems(bankv, wsv, repv) == {},
+      runnable_problems(bankv, wsv, repv))
+check("H2 --run would refuse every unsupported packet", all(
+    gj.packet_reuse_problems(gj.load_packet(gj.latest_packet(pdirv, q))[0],
+                             SimpleNamespace(bank_sha=bank_sha_v, units={u.question_id: u for u in eq.iter_units(VBANK)}), q)
+    for q in ("v-leg-pending", "v-unk-pending", "v-leg-oldsuccess", "v-leg-failed")))
+check("H2 summary explains the version limit", "版本不明" in (dv / "report" / "progress_summary.md").read_text(encoding="utf-8"))
+check("H2 inputs unchanged", tree_hashes(bankv, wsv) == wsv_before)
+
+# Git 排除條件：不在儲存庫內、未受排除、含已追蹤檔案、找不到 git → 不得列為可執行
+RUNNABLE = ("pending", "failed_retryable", "needs_rejudge")
+
+
+def git_case(label, ws_dir, bank_path, base_dir, expect_any):
+    rc_, log_ = run_audit(bank_path, ws_dir, base_dir / f"report-{label}")
+    rep_ = json.loads((base_dir / f"report-{label}" / "progress_detail.json").read_text(encoding="utf-8"))
+    st_ = {u["id"]: u["status"] for u in rep_["units"]}
+    probs = "；".join(rep_["workspace"]["preflight_problems"])
+    check(f"G {label}: preflight problem recorded", rc_ == 0 and any(e in probs for e in expect_any), (probs, log_))
+    check(f"G {label}: nothing listed as runnable", all(rep_["counts"][s] == 0 for s in RUNNABLE)
+          and ids_in(base_dir / f"report-{label}", "pending_ids.txt") == []
+          and ids_in(base_dir / f"report-{label}", "needs_rejudge_ids.txt") == [], rep_["counts"])
+    check(f"G {label}: completed still completed, blocked reason names the preflight",
+          st_["u-done"] == "completed" and st_["u-pending"] == "blocked"
+          and any(e in "；".join(next(u for u in rep_["units"] if u["id"] == "u-pending")["reasons"]) for e in expect_any), st_)
+
+
+probe = subprocess.run(["git", "-C", str(REAL_TEMP), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+if probe.returncode != 0:
+    dg1, bg1, wg1, sg1 = make_env(base=REAL_TEMP)
+    write_results(wg1, sg1)
+    git_case("outside any git repo", wg1, bg1, dg1, ("不在 Git 儲存庫內",))
+else:
+    print("NOTE outside-repo case skipped: system temp is inside a git repo")
+(GIT_ROOT / "notignored").mkdir()
+dg2, bg2, wg2, sg2 = make_env(base=GIT_ROOT / "notignored")
+write_results(wg2, sg2)
+git_case("not ignored by .gitignore", wg2, bg2, dg2, ("未受 .gitignore 排除",))
+dg3, bg3, wg3, sg3 = make_env()
+write_results(wg3, sg3)
+rel3 = (wg3 / "verification.json").relative_to(GIT_ROOT).as_posix()
+subprocess.run(["git", "-C", str(GIT_ROOT), "add", "-f", rel3], check=True)  # 測試夾具：只作用在臨時儲存庫
+git_case("tracked file inside workspace", wg3, bg3, dg3, ("已受 Git 追蹤", "未受 .gitignore 排除"))
+dg4, bg4, wg4, sg4 = make_env()
+write_results(wg4, sg4)
+real_git = gj.GIT_EXE
+gj.GIT_EXE = "git-executable-that-does-not-exist-xyz"
+try:
+    git_case("git unavailable", wg4, bg4, dg4, ("無法執行 git",))
+finally:
+    gj.GIT_EXE = real_git
+check("G ignored workspace in the same repo is runnable again after restoring git", gj.mode_preflight("run", wg4, bg4) == [])
 
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} passed")
 sys.exit(1 if FAILED else 0)
