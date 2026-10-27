@@ -206,6 +206,12 @@ def setup(ids=("m-single", "m-multi", "m-stmt"), search=fake_search, ver_edit=No
     return SimpleNamespace(dir=d, bank=bank, out=out, argv=argv, rc=rc, log=buf.getvalue(), base=base)
 
 
+def no_consensus(qs):
+    """M-B 之後，達社群共識門檻的題目不會送出 Gemini。既有「--run 的 API 流程」測試以此讓 m-single 的社群投票
+    不達門檻（9 票 < 10），使其照舊走 Gemini 路徑；社群直接採用的行為另由第 12 節測試。"""
+    qs["m-single"]["examtopics_evidence"]["community_vote"]["vote_count"] = 9
+
+
 def packet_of(env, qid):
     p, _, _ = gj.load_packet(gj.latest_packet(env.out / "gemini_judge" / "packets", qid))
     return p
@@ -782,7 +788,7 @@ def sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
-e1 = setup()
+e1 = setup(ver_edit=no_consensus)
 before = (sha(e1.bank), sha(e1.out / "verification.json"))
 pk1 = packet_of(e1, "m-single")
 c = FakeClient([single_result(pk1), FakeAPIError(503, "UNAVAILABLE high demand"), FakeAPIError(503, "UNAVAILABLE")])
@@ -798,7 +804,7 @@ check("model name recorded", res["questions"]["m-single"]["runs"][0]["model"] ==
 check("bank and verification untouched", (sha(e1.bank), sha(e1.out / "verification.json")) == before)
 check("sent prompt is packet", '"question_id": "m-single"' in c.calls[0][1] and "pinned_human_excerpt" not in c.calls[0][1])
 
-e2 = setup()
+e2 = setup(ver_edit=no_consensus)
 c = FakeClient([FakeAPIError(429, f"RESOURCE_EXHAUSTED quota key={FAKE_KEY}"), {}, {}])
 rc, log, _ = run(e2, c)
 res = results(e2)
@@ -807,12 +813,12 @@ check("429 remaining not sent", "m-multi" not in res["questions"] and "未送出
 check("key redacted in record", FAKE_KEY not in (e2.out / "gemini_judgments.json").read_text(encoding="utf-8"))
 check("key redacted in log", FAKE_KEY not in log)
 
-e3 = setup()
+e3 = setup(ver_edit=no_consensus)
 c = FakeClient([FakeAPIError(401, "API key not valid"), {}, {}])
 rc, log, _ = run(e3, c)
 check("401 fatal stop", rc == 1 and len(c.calls) == 1 and results(e3)["questions"]["m-single"]["runs"][0]["status"] == "fatal")
 
-e4 = setup()
+e4 = setup(ver_edit=no_consensus)
 c = FakeClient(["not json", {"suggested_answer": '"Z"'}, {}])
 rc, log, _ = run(e4, c)
 res = results(e4)
@@ -843,7 +849,7 @@ c = FakeClient([{}])
 rc, log, made = run(e7, c)
 check("bank changed refused", rc == 2 and not made and "題庫已在 dry-run 後變更" in log)
 
-e8 = setup(ids=("m-single",))
+e8 = setup(ids=("m-single",), ver_edit=no_consensus)
 pk8 = packet_of(e8, "m-single")
 run(e8, FakeClient([single_result(pk8)]))
 run(e8, FakeClient([single_result(pk8, answer='"C"')]), extra=("--tier", "paid", "--force"))  # 第二次需 --force，否則依 P0-1 跳過
@@ -964,18 +970,24 @@ for st in ("deferred", "rate_limited", "fatal", "invalid_output"):
     check(f"F9 statement {st} → no fallback", f["answer"] is None and f["source"] == "none_api_failed" and f["fallback_reason"] == st)
 
 # 實際 --run 紀錄中的最終推薦（e1：503、e2：429、e3：401、e4：invalid_output / invalid_answer）
+# M-B：達門檻的社群題不會送出 API（見第 12 節），因此 e1～e4 的 m-single 改為未達門檻（9 票）。
+# 「API 失敗 + 達門檻社群 → 社群」的推薦規則仍由上方 F6 以 final_recommendation() 直接驗證；
+# 以下改為驗證未達門檻時的既有 API 路徑：成功 → gemini，失敗 → 單選回退題庫答案，且社群未被採用。
 r1 = results(e1)["questions"]
-check("run 200 single (qualifying community) → community", r1["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "community")
+check("run 200 single (community below threshold) → gemini", r1["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "gemini"
+      and r1["m-single"]["runs"][0]["final_exam_recommendation"]["community"]["qualifies"] is False)
 check("run 503 multi → bank fallback", r1["m-multi"]["runs"][0]["final_exam_recommendation"]["answer"] == ["A", "C"]
       and r1["m-multi"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback")
 check("run 503 statement → no fallback", r1["m-stmt"]["runs"][0]["final_exam_recommendation"]["source"] == "none_api_failed"
       and r1["m-stmt"]["runs"][0]["final_exam_recommendation"]["answer"] is None)
 f2 = results(e2)["questions"]["m-single"]["runs"][0]["final_exam_recommendation"]
-check("run 429 single + qualifying community → community (no bank fallback)", f2["source"] == "community" and f2["gemini_status"] == "rate_limited")
+check("run 429 single + community below threshold → bank fallback", f2["source"] == "bank_fallback" and f2["gemini_status"] == "rate_limited"
+      and f2["fallback_reason"] == "rate_limited")
 f3 = results(e3)["questions"]["m-single"]["runs"][0]["final_exam_recommendation"]
-check("run 401 single + qualifying community → community", f3["source"] == "community" and f3["gemini_status"] == "fatal")
+check("run 401 single + community below threshold → bank fallback", f3["source"] == "bank_fallback" and f3["gemini_status"] == "fatal")
 r4 = results(e4)["questions"]
-check("run invalid_output single + qualifying community → community", r4["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "community"
+check("run invalid_output single + community below threshold → bank fallback",
+      r4["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback"
       and r4["m-single"]["runs"][0]["final_exam_recommendation"]["gemini_status"] == "invalid_output")
 check("run invalid_answer multi → bank fallback", r4["m-multi"]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback")
 check("run invalid statement → no fallback", r4["m-stmt"]["runs"][0]["final_exam_recommendation"]["source"] == "none_invalid_output")
@@ -1492,13 +1504,13 @@ check("G5c unreadable (bad encoding) → refused", rc == 2 and ("無法讀取" i
 check("G6 valid snapshot → preflight passes", gj.run_preflight(gd) == [])
 
 # 通過前置檢查後照原流程執行（使用既有 setup 的測試目錄：有快照、有證據包），且快照不被修改
-eg = setup(ids=("m-single",))
+eg = setup(ids=("m-single",), ver_edit=no_consensus)
 snap_hash = hashlib.sha256((eg.out / "verification.json").read_bytes()).hexdigest()
 check("G7 setup dir passes preflight", gj.run_preflight(eg.out) == [])
 rc, log, made, asked, cl = guarded_run(["--output-dir", str(eg.out)], bank=eg.bank)
 res_g = results(eg)
 check("G7 passes → exactly one API call per question", rc == 0 and len(made) == 1 and asked and len(cl.calls) == 1, log)
-check("G7 result written only to the test dir", res_g and res_g["questions"]["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "community")
+check("G7 result written only to the test dir", res_g and res_g["questions"]["m-single"]["runs"][0]["final_exam_recommendation"]["source"] == "gemini")
 check("G7 snapshot not modified by run", hashlib.sha256((eg.out / "verification.json").read_bytes()).hexdigest() == snap_hash)
 check("G7 official output dir still untouched", official_state() == state_before)
 
@@ -1539,7 +1551,7 @@ def section(md, qid):
 
 
 # P0-1：已成功、一致 → 0 次 API；全部跳過時不建立 client、不新增紀錄、不備份
-ep = setup(ids=("m-single", "m-multi"))
+ep = setup(ids=("m-single", "m-multi"), ver_edit=no_consensus)
 pk_s = packet_of(ep, "m-single")
 rc, log, made = run(ep, FakeClient([single_result(pk_s), multi_result('["A","C"]')]))
 check("P1 first run: both done", rc == 0 and nruns(ep, "m-single") == 1 and nruns(ep, "m-multi") == 1
@@ -1561,7 +1573,7 @@ with redirect_stdout(buf):
 check("P2 --force without --run rejected", rc == 2 and "只能搭配 --run" in buf.getvalue())
 
 # P0-1：舊版本、雜湊、模型、缺欄位、判定版本不一致 → 不得跳過
-e3p = setup(ids=("m-single",))
+e3p = setup(ids=("m-single",), ver_edit=no_consensus)
 pk3 = packet_of(e3p, "m-single")
 run(e3p, FakeClient([single_result(pk3)]))
 for label, fn, extra in (
@@ -1580,14 +1592,14 @@ for label, fn, extra in (
 check("P3 completed_run rejects non-dict / empty", gj.completed_run([None, "x"], "a", "m") is None and gj.completed_run([], "a", "m") is None)
 
 # P0-1：同批中已成功者跳過、失敗者補跑
-e4p = setup(ids=("m-single", "m-multi"))
+e4p = setup(ids=("m-single", "m-multi"), ver_edit=no_consensus)
 pk4 = packet_of(e4p, "m-single")
 run(e4p, FakeClient([single_result(pk4), FakeAPIError(503, "UNAVAILABLE")]))
 c4 = FakeClient([multi_result('["A","C"]')])
 rc, log, made = run(e4p, c4)
 check("P4 only failed question re-run", rc == 0 and len(c4.calls) == 1 and '"question_id": "m-multi"' in c4.calls[0][1]
       and nruns(e4p, "m-single") == 1 and nruns(e4p, "m-multi") == 2, log)
-e4c = setup(ids=("m-single",))
+e4c = setup(ids=("m-single",), ver_edit=no_consensus)
 run(e4c, FakeClient([single_result(packet_of(e4c, "m-single"), answer='"Z"')]))
 c4c = FakeClient([single_result(packet_of(e4c, "m-single"))])
 rc, log, made = run(e4c, c4c)
@@ -1621,7 +1633,7 @@ check("P7 invalid answer / invalid output do not override", '最終考試推薦�
 check("P7 effective_run_index picks last evaluated", gj.effective_run_index(results(e7p)["questions"]["m-multi"]["runs"]) == 0)
 
 # P0-3：每次執行只備份一次；無寫入不備份；仍使用原子寫入
-e9p = setup(ids=("m-single", "m-multi", "m-stmt"))
+e9p = setup(ids=("m-single", "m-multi", "m-stmt"), ver_edit=no_consensus)
 pk9s, pk9t = packet_of(e9p, "m-single"), packet_of(e9p, "m-stmt")
 rs9 = copy.deepcopy(rs)
 run(e9p, FakeClient([single_result(pk9s), multi_result('["A","C"]'), rs9]))
@@ -1855,13 +1867,13 @@ check("DR7 valid snapshot → preflight passes", gj.dry_run_preflight(wsv, dr_ba
 pk_name = pf_ok[0]
 pk_hash = hashlib.sha256((ws_ok / "gemini_judge" / "packets" / pk_name).read_bytes()).hexdigest()
 rc, log, calls = dry(dr_bank, ws_ok)
-check("DR8 same question again → refused before request", rc == 2 and "不是空白工作區" in log and "gemini_judge/" in log
+check("DR8 same question again → refused before request", rc == 2 and "m-single：工作區已有證據包" in log
       and not calls, log)
 check("DR8 existing packet untouched, no new packet", packet_files(ws_ok) == [pk_name]
       and hashlib.sha256((ws_ok / "gemini_judge" / "packets" / pk_name).read_bytes()).hexdigest() == pk_hash)
 check("DR8 latest_packet unchanged", gj.latest_packet(ws_ok / "gemini_judge" / "packets", "m-single").name == pk_name)
 rc, log, calls = dry(dr_bank, ws_ok, ids=("m-multi", "m-single"))
-check("DR9 any conflict in batch → whole batch refused, no request", rc == 2 and "不是空白工作區" in log
+check("DR9 any conflict in batch → whole batch refused, no request", rc == 2 and "m-single：工作區已有證據包" in log
       and not calls and packet_files(ws_ok) == [pk_name], log)
 ws_dup = DRB / "ws_dup"
 valid_snapshot(ws_dup, dr_bank)
@@ -1956,7 +1968,7 @@ va.DEFAULT_OUT = P1_BASE
 p1_base_state = tree(P1_BASE)
 
 # ---- F-01：--report／--reevaluate 路徑與寫入保護 ----
-ef1 = setup(ids=("m-single",))
+ef1 = setup(ids=("m-single",), ver_edit=no_consensus)
 run(ef1, FakeClient([single_result(packet_of(ef1, "m-single"))]))
 shutil.copyfile(ef1.out / "gemini_judgments.json", P1_BASE / "gemini_judgments.json")  # 舊行為下會被預設寫回的正式結果
 official_before = tree(P1_BASE)
@@ -2055,9 +2067,16 @@ check("F02 helper: ignored temp workspace passes", gj.git_ignore_problems(ws_ng)
 for i, (label, make) in enumerate((
         ("extra note file", lambda w: (w / "notes.txt").write_text("x", encoding="utf-8")),
         ("results file", lambda w: (w / "gemini_judgments.json").write_text("{}", encoding="utf-8")),
-        ("empty gemini_judge dir", lambda w: (w / "gemini_judge").mkdir()),
-        ("backups dir", lambda w: (w / "backups").mkdir()),
-        ("report file", lambda w: (w / "gemini_judgments.md").write_text("x", encoding="utf-8")),
+        # M-A：空的 gemini_judge/、backups/ 與報告檔是本程式會建立的合法累積狀態（見下方「接受」測試）；
+        # 原本這三項的拒絕斷言改為對其內部未知內容的拒絕
+        ("unknown subdir in gemini_judge", lambda w: (w / "gemini_judge" / "cache").mkdir(parents=True)),
+        ("unknown file in backups", lambda w: ((w / "backups").mkdir(), (w / "backups" / "notes.txt").write_text("x", encoding="utf-8"))),
+        ("non-packet file in packets", lambda w: ((w / "gemini_judge" / "packets").mkdir(parents=True),
+                                                  (w / "gemini_judge" / "packets" / "readme.json").write_text("{}", encoding="utf-8"))),
+        ("unfinished packet write (.part)", lambda w: ((w / "gemini_judge" / "packets").mkdir(parents=True),
+                                                       (w / "gemini_judge" / "packets" / ".packet-abc.part").write_text("x", encoding="utf-8"))),
+        ("unknown file in attempts", lambda w: ((w / "gemini_judge" / "attempts").mkdir(parents=True),
+                                                (w / "gemini_judge" / "attempts" / "x.json").write_text("{}", encoding="utf-8"))),
         ("old fixed tmp", lambda w: (w / "gemini_judgments.json.tmp").write_text("x", encoding="utf-8")),
         ("lock name used by a directory", lambda w: (w / gj.LOCK_NAME).mkdir()))):
     w = DRB / f"f03_{i}"
@@ -2074,9 +2093,17 @@ rc, log, calls = dry(dr_bank, w_foreign)
 check("F03 leftover / foreign lock file allowed (not deleted, not modified)", rc == 0 and calls
       and (w_foreign / gj.LOCK_NAME).read_bytes() == b"foreign-owner-unknown", log)
 check("F03 rule documented", "verification.json" in gj.EMPTY_WORKSPACE_RULE and gj.LOCK_NAME in gj.EMPTY_WORKSPACE_RULE)
+for i, (label, make) in enumerate((("empty gemini_judge dir", lambda w: (w / "gemini_judge").mkdir()),
+                                   ("empty backups dir", lambda w: (w / "backups").mkdir()),
+                                   ("report file", lambda w: (w / "gemini_judgments.md").write_text("x", encoding="utf-8")))):
+    w = DRB / f"f03_ok_{i}"
+    valid_snapshot(w, dr_bank)
+    make(w)
+    rc, log, calls = dry(dr_bank, w)
+    check(f"F03/M-A {label} (created by this program) → accepted", rc == 0 and calls and len(packet_files(w)) == 1, (label, log[-300:]))
 
 # ---- F-04：原子寫入（唯一暫存檔、失敗時原檔完整、只清理自己的暫存檔、保留備份政策）----
-ea = setup(ids=("m-single", "m-multi"))
+ea = setup(ids=("m-single", "m-multi"), ver_edit=no_consensus)
 run(ea, FakeClient([single_result(packet_of(ea, "m-single")), multi_result('["A","C"]')]))
 res_path = ea.out / "gemini_judgments.json"
 orig_bytes = res_path.read_bytes()
@@ -2107,7 +2134,7 @@ check("F04 backup policy kept (timestamped copy identical to previous file)", ma
 check("F04 appended record present, JSON valid", results(ea)["questions"]["m-single"]["runs"][-1] == {"at": "manual"})
 
 # 送出前的請求紀錄寫入失敗 → 不呼叫 API
-eb = setup(ids=("m-single",))
+eb = setup(ids=("m-single",), ver_edit=no_consensus)
 cl_b = FakeClient([single_result(packet_of(eb, "m-single"))])
 real_link = gj.os.link
 gj.os.link = lambda *a, **k: (_ for _ in ()).throw(OSError("simulated: cannot create attempt record"))
@@ -2119,7 +2146,7 @@ check("F04 attempt record cannot be written → no API call, no result written",
       and not (eb.out / "gemini_judgments.json").exists() and "寫入失敗" in log, log)
 
 # API 呼叫後、寫入前中斷 → 留下可辨識的「未完成」狀態；鎖已釋放
-ec = setup(ids=("m-single",))
+ec = setup(ids=("m-single",), ver_edit=no_consensus)
 cl_c = FakeClient([single_result(packet_of(ec, "m-single"))])
 real_append = gj.append_run
 gj.append_run = lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt())
@@ -2239,11 +2266,11 @@ check("C1 process A completes", rc_a == 0 and len(packet_files(ws_c1)) == 1, (rc
 C = spawn("dry", ws_c1, dr_bank, P1_BASE)
 ALL_CHILDREN.append(C)
 rc_c, out_c = finish(C)
-check("C1 later dry-run on same workspace → refused (not empty), zero requests", rc_c == 2 and "不是空白工作區" in out_c
+check("C1 later dry-run of the same question → refused (packet exists), zero requests", rc_c == 2 and "工作區已有證據包" in out_c
       and not {"search", "fetch"} & set(names(C)), out_c)
 
 # C2：--run 執行中，其他程序的 --run／--reevaluate／--report 都在建立 client 與寫入之前被拒絕
-ec2 = setup(ids=("m-single",))
+ec2 = setup(ids=("m-single",), ver_edit=no_consensus)
 run(ec2, FakeClient([single_result(packet_of(ec2, "m-single"))]))  # 先有一筆結果，讓 reevaluate／report 通過預檢
 rel2 = DRB / "c2.release"
 A2 = spawn("run", ec2.out, ec2.bank, ec2.base, rel2)
@@ -2600,6 +2627,270 @@ try:
 finally:
     gj.dry_run_batch_problems = real_batch
 check("F14 bank changed before lock → refused, zero requests", rc == 2 and not calls and not packet_files(ws_t3), log)
+
+# ===========================================================================
+# 12. M-A：同一工作區累積多批；M-B：達社群共識門檻者直接採用、不呼叫 Gemini
+# ===========================================================================
+import audit_judge_progress as ap  # noqa: E402
+
+
+def run_ws(ws_dir, bank_path, ids, client, extra=("--tier", "paid")):
+    """以 --run 執行（假 client）；回傳 rc、輸出、client 建立紀錄、確認提示紀錄。"""
+    made_, asked_ = [], []
+    gj.confirm = lambda prompt: (asked_.append(prompt), True)[1]
+    rc_, log_ = mainq(["--bank", str(bank_path), "--output-dir", str(ws_dir), "--ids", ",".join(ids), "--run", *extra],
+                      client_factory=lambda k: (made_.append(k), client)[1])
+    return rc_, log_, made_, asked_
+
+
+def audit_ws(bank_path, ws_dir, out_dir):
+    buf_ = io.StringIO()
+    with redirect_stdout(buf_):
+        rc_ = ap.main(["--bank", str(bank_path), "--workspace", str(ws_dir), "--out", str(out_dir)])
+    rep_ = json.loads((out_dir / "progress_detail.json").read_text(encoding="utf-8"))
+    return rc_, rep_, {u["id"]: u["status"] for u in rep_["units"]}, {u["id"]: "；".join(u["reasons"]) for u in rep_["units"]}
+
+
+def ids_file(out_dir, name):
+    return sorted(x for x in (out_dir / name).read_text(encoding="utf-8").splitlines() if x and not x.startswith("#"))
+
+
+def pk_hashes(ws_dir):
+    d = ws_dir / "gemini_judge" / "packets"
+    return {p.name: sha(p) for p in sorted(d.glob("*.json"))}
+
+
+ctx_m = va.Ctx(dr_bank, DRB / "unused-out")
+ent_m = va.new_entry(ctx_m, ctx_m.units["m-single"])
+ent_m["examtopics_evidence"].update(match_status="exact", url="https://www.examtopics.com/discussions/microsoft/view/1-x/",
+                                    page_answer="B", community_vote={"answer": "B", "share_percent": 90, "vote_count": 20,
+                                                                     "as_of": "2026-10-27"})
+MA_BASE = DRB / "ma_repo" / "output"
+valid_snapshot(MA_BASE, dr_bank, {"m-single": ent_m})
+wsa = DRB / "ma_ws"
+valid_snapshot(wsa, dr_bank, {"m-single": ent_m})
+snap_a = sha(wsa / "verification.json")
+va.DEFAULT_OUT = MA_BASE
+real_make_client2 = gj.eq.make_client
+gj.eq.make_client = no_client  # M-A 只涉及 dry-run：任何建立 client 的嘗試都會讓測試失敗
+try:
+    # ---- M-A：兩批累積 ----
+    rc, log, calls = dry(dr_bank, wsa, ids=("m-single", "m-multi"))
+    batch1 = pk_hashes(wsa)
+    check("MA1 batch 1 in empty workspace → 2 packets", rc == 0 and calls and len(batch1) == 2, log[-300:])
+    cl_a = FakeClient([multi_result('["A","C"]')])
+    rc, log, made, asked = run_ws(wsa, dr_bank, ("m-single", "m-multi"), cl_a)
+    check("MA run batch 1: qualifying community adopted, only m-multi sent", rc == 0 and len(cl_a.calls) == 1
+          and '"question_id": "m-multi"' in cl_a.calls[0][1] and '"question_id": "m-single"' not in cl_a.calls[0][1], log[-400:])
+    rc, log, calls = dry(dr_bank, wsa, ids=("m-stmt", "m-tactic"))
+    after2 = pk_hashes(wsa)
+    check("MA2 batch 2 in the same (non-empty) workspace → accepted", rc == 0 and calls and len(after2) == 4, log[-300:])
+    check("MA2 batch-1 packets unchanged (names and SHA256)", all(after2.get(k) == v for k, v in batch1.items()))
+    check("MA2 snapshot unchanged", sha(wsa / "verification.json") == snap_a)
+    check("MA2 new packets verified with the same snapshot", all(
+        gj.load_packet(wsa / "gemini_judge" / "packets" / n)[0]["snapshot_sha256"] == snap_a for n in after2))
+    state_a = tree(wsa)
+    for label, ids_ in (("same question again", ("m-single",)), ("batch containing an existing question", ("m-nodoc", "m-multi"))):
+        rc, log, calls = dry(dr_bank, wsa, ids=ids_)
+        check(f"MA3 {label} → refused before request, nothing changed", rc == 2 and "工作區已有證據包" in log and not calls
+              and tree(wsa) == state_a, log[-300:])
+
+    def variant(name, prep):
+        w = DRB / f"ma_{name}"
+        shutil.copytree(wsa, w)
+        prep(w)
+        return w, tree(w)
+
+    for label, prep, expect in (
+            ("unknown file", lambda w: (w / "notes.txt").write_text("x", encoding="utf-8"), "不是空白工作區"),
+            ("unknown directory", lambda w: (w / "scratch").mkdir(), "不是空白工作區"),
+            ("malformed results file", lambda w: (w / "gemini_judgments.json").write_text("[]", encoding="utf-8"), "格式不符"),
+            ("snapshot changed", lambda w: valid_snapshot(w, dr_bank, {"m-single": ent_m, "m-multi": va.new_entry(ctx_m, ctx_m.units["m-multi"])}),
+             "快照與目前快照不同"),
+            ("legacy v1 packet present", lambda w: gj.save_packet(w / "gemini_judge" / "packets",
+                                                                  {"question_id": "m-mitre", "packet_version": 1, "bank_sha256": "x",
+                                                                   "bank_answer": {"value": "A"}}), "舊版"),
+            ("tampered existing packet", lambda w: (lambda p: p.write_text(p.read_text(encoding="utf-8").replace('"B"', '"C"', 1),
+                                                                            encoding="utf-8"))(
+                sorted((w / "gemini_judge" / "packets").glob("m-single.*.json"))[0]), "雜湊不符")):
+        w, before_w = variant(label.replace(" ", "_"), prep)
+        rc, log, calls = dry(dr_bank, w, ids=("m-nodoc",))
+        check(f"MA4/5 {label} → workspace refused, no request, nothing changed", rc == 2 and expect in log and not calls
+              and tree(w) == before_w, (label, log[-400:]))
+    w_base, before_b = variant("baseline_changed", lambda w: None)
+    va.DEFAULT_OUT = P1_BASE  # 正式基準改變（與快照不同）→ 本批會是 unverified，與既有 verified 證據包不一致
+    rc, log, calls = dry(dr_bank, w_base, ids=("m-nodoc",))
+    va.DEFAULT_OUT = MA_BASE
+    check("MA5 official baseline changed after earlier batches → refused, snapshot not auto-updated", rc == 2
+          and "信任等級" in log and not calls and tree(w_base) == before_b, log[-400:])
+    w_git = GIT_ROOT / "notignored" / "ma_ws"
+    shutil.copytree(wsa, w_git)
+    rc, log, calls = dry(dr_bank, w_git, ids=("m-nodoc",))
+    check("MA6 accumulated workspace outside .gitignore → refused (Git check kept)", rc == 2 and "未受 .gitignore 排除" in log and not calls)
+    rel_l = DRB / "ma.release"
+    H = spawn("hold_lock", wsa, dr_bank, MA_BASE, rel_l)
+    check("MA6 child holds the accumulated workspace lock", wait_event(H, "locked"))
+    rc, log, calls = dry(dr_bank, wsa, ids=("m-nodoc",))
+    rel_l.write_text("go", encoding="utf-8")
+    finish(H)
+    check("MA6 lock still enforced on accumulated workspace", rc == 2 and "無法取得工作區鎖" in log and not calls and tree(wsa) == state_a)
+    off_before = tree(MA_BASE)
+    for official in (MA_BASE, MA_BASE / "gemini_judge"):
+        rc, log, calls = dry(dr_bank, official, ids=("m-nodoc",))
+        check(f"MA6 official folder never reusable ({official.name})", rc == 2 and "正式工作區" in log and not calls)
+    check("MA6 official folder untouched", tree(MA_BASE) == off_before)
+    check("MA H2 packet generation still applied by --run",
+          gj.packet_reuse_problems({"packet_version": 1, "bank_sha256": "x", "bank_answer": {"value": "B"}},
+                                   SimpleNamespace(bank_sha="x", units=ctx_m.units), "m-single") != [])
+    # 累積工作區的盤點
+    rc, rep_a, st_a, why_a = audit_ws(dr_bank, wsa, DRB / "ma_audit")
+    check("MA7 audit of accumulated workspace", rc == 0 and st_a["m-single"] == "completed" and st_a["m-multi"] == "completed"
+          and st_a["m-stmt"] == "pending" and st_a["m-tactic"] == "pending"
+          and st_a["m-nodoc"] == "blocked" and st_a["m-mitre"] == "blocked" and rep_a["counts"]["completed"] == 2, st_a)
+    check("MA7 pending_ids = second batch only", ids_file(DRB / "ma_audit", "pending_ids.txt") == ["m-stmt", "m-tactic"])
+    w_leg = DRB / "ma_legacy_audit"
+    shutil.copytree(wsa, w_leg)
+    gj.save_packet(w_leg / "gemini_judge" / "packets", {"question_id": "m-mitre", "packet_version": 1,
+                                                       "bank_sha256": gj.eq.sha256_file(dr_bank), "bank_answer": {"value": "A"}})
+    rc, rep_l, st_l, why_l = audit_ws(dr_bank, w_leg, DRB / "ma_audit_legacy")
+    check("MA7 legacy packet in accumulated workspace → blocked, not completed / pending", st_l["m-mitre"] == "blocked"
+          and "舊版" in why_l["m-mitre"] and rep_l["counts"]["completed"] == 2 and "m-mitre" not in ids_file(DRB / "ma_audit_legacy", "pending_ids.txt"))
+finally:
+    gj.eq.make_client = real_make_client2
+    va.DEFAULT_OUT = P1_BASE
+
+# ---- M-B：達門檻者不呼叫 Gemini ----
+real_load_key = gj.eq.load_api_key
+KEY_LOADS = []
+gj.eq.load_api_key = lambda: (KEY_LOADS.append(1), FAKE_KEY)[1]
+try:
+    emb = setup(ids=("m-single", "m-multi", "m-stmt"))  # m-single：exact、20 票、90%、快照 verified
+    pk_mb, sha_mb, _ = gj.load_packet(gj.latest_packet(emb.out / "gemini_judge" / "packets", "m-single"))
+    check("MB precondition: m-single qualifies (formal_consensus)", gj.formal_consensus(pk_mb, unit(emb, "m-single"))["qualifies"] is True)
+    cl_b = FakeClient([multi_result('["A","C"]'), rs])
+    rc, log, made, asked = run_ws(emb.out, emb.bank, ("m-single", "m-multi", "m-stmt"), cl_b)
+    sent = [c[1] for c in cl_b.calls]
+    check("MB1 qualifying community → 0 Gemini calls for it (spy)", rc == 0 and len(cl_b.calls) == 2
+          and not any('"question_id": "m-single"' in s for s in sent), [s[:80] for s in sent])
+    rec = results(emb)["questions"]["m-single"]["runs"][0]
+    check("MB2 auditable community record", rec["kind"] == "community_adopted" and rec["api_called"] is False
+          and rec["status"] == "community_adopted" and rec["model_output"] is None and rec["attempt_id"] is None
+          and rec["packet_sha256"] == sha_mb and rec["packet_file"] == gj.latest_packet(emb.out / "gemini_judge" / "packets", "m-single").name
+          and rec["evaluator_version"] == gj.EVALUATOR_VERSION and rec["packet_rules_version"] == gj.PACKET_RULES_VERSION
+          and rec["packet_version"] == gj.PACKET_VERSION and rec["usage"]["total_tokens"] == 0 and rec["cost_usd_estimate"] == 0
+          and rec["community_qualification"]["qualifies"] is True
+          and rec["final_exam_recommendation"]["source"] == "community" and rec["final_exam_recommendation"]["answer"] == "B", rec)
+    att = sorted(p.name.split(".")[0] for p in (emb.out / "gemini_judge" / "attempts").glob("*.json"))
+    check("MB2 no API attempt record for the community question", att == ["m-multi", "m-stmt"], att)
+    check("MB2 completed_run recognises the community record", gj.completed_run([rec], sha_mb, "any-model") is rec)
+    cl_b2 = FakeClient([])
+    rc, log, made, asked = run_ws(emb.out, emb.bank, ("m-single", "m-multi", "m-stmt"), cl_b2)
+    check("MB3 rerun → all skipped, no client, no API, no new record", rc == 0 and not made and not cl_b2.calls
+          and log.count("略過") == 3 and all(len(v["runs"]) == 1 for v in results(emb)["questions"].values()), log[-300:])
+    keys0 = len(KEY_LOADS)
+    cl_b3 = FakeClient([])
+    rc, log, made, asked = run_ws(emb.out, emb.bank, ("m-single",), cl_b3, extra=("--tier", "paid", "--force"))
+    check("MB3 --force on a community question → re-adopted without API, key or confirmation", rc == 0 and not made and not cl_b3.calls
+          and not asked and len(KEY_LOADS) == keys0 and len(results(emb)["questions"]["m-single"]["runs"]) == 2, log[-300:])
+    emo = setup(ids=("m-single",))
+    keys0 = len(KEY_LOADS)
+    cl_b4 = FakeClient([])
+    rc, log, made, asked = run_ws(emo.out, emo.bank, ("m-single",), cl_b4)
+    check("MB1b community-only batch → no client, no API key, no confirmation, no request", rc == 0 and not made and not cl_b4.calls
+          and not asked and len(KEY_LOADS) == keys0 and "未建立 API client" in log, log[-300:])
+    em429 = setup(ids=("m-single", "m-multi"))
+    cl_429 = FakeClient([FakeAPIError(429, "RESOURCE_EXHAUSTED")])
+    rc, log, made, asked = run_ws(em429.out, em429.bank, ("m-single", "m-multi"), cl_429)
+    check("MB5 API failure on another question does not affect the community adoption", rc == 1 and len(cl_429.calls) == 1
+          and results(em429)["questions"]["m-single"]["runs"][0]["kind"] == "community_adopted"
+          and results(em429)["questions"]["m-multi"]["runs"][0]["status"] == "rate_limited")
+    # 不達門檻 → 照舊走 Gemini（以 dry-run 建立的證據包）
+    tie = lambda qs: qs["m-single"]["examtopics_evidence"]["community_vote"].update(  # noqa: E731
+        distribution=[{"answer": "B", "percent": 50, "votes": 10}, {"answer": "C", "percent": 50, "votes": 10}], share_percent=50)
+    low_share = lambda qs: qs["m-single"]["examtopics_evidence"]["community_vote"].update(  # noqa: E731
+        distribution=[{"answer": "B", "percent": 70, "votes": 139}, {"answer": "C", "percent": 30, "votes": 61}],
+        share_percent=70, vote_count=200)
+    for label, edit in (("9 votes", no_consensus), ("69.5% exact (displayed 70)", low_share), ("tie", tie)):
+        en = setup(ids=("m-single",), ver_edit=edit)
+        cl_n = FakeClient([single_result(packet_of(en, "m-single"))])
+        rc, log, made, asked = run_ws(en.out, en.bank, ("m-single",), cl_n)
+        r0 = results(en)["questions"]["m-single"]["runs"][0]
+        check(f"MB4 {label} → not adopted, Gemini called once (spy)", rc == 0 and len(cl_n.calls) == 1 and len(made) == 1
+              and r0["kind"] == "api_call" and r0["final_exam_recommendation"]["community"]["qualifies"] is False, (label, log[-300:]))
+    # 不達門檻（證據包層級）：答案無效、非選擇題帶分布、快照未驗證 → 以 save_packet 放入較新的證據包後送出
+
+    def newer_packet(env_, qid_, packet_):
+        gj.save_packet(env_.out / "gemini_judge" / "packets", packet_)
+        return gj.load_packet(gj.latest_packet(env_.out / "gemini_judge" / "packets", qid_))
+
+    for label, qid_, mut, result_ in (
+            ("community answer not an option", "m-single", lambda p: with_vote(p, "Z", D(("Z", 30)), 100, 30), "single"),
+            ("non-choice with distribution", "m-stmt", lambda p: with_vote(p, {"s1": "Yes", "s2": "No"},
+                                                                           [{"answer": "YN", "percent": 100, "votes": 20}], 100, 20), "stmt"),
+            ("snapshot unverified", "m-single", lambda p: dict(p, snapshot_trust=dict(p["snapshot_trust"], level="unverified",
+                                                                                        reasons=["test"])), "single")):
+        en = setup(ids=(qid_,))
+        base_p = packet_of(en, qid_)
+        new_p, _, ok_ = newer_packet(en, qid_, mut(base_p))
+        cl_n = FakeClient([single_result(new_p) if result_ == "single" else rs])
+        rc, log, made, asked = run_ws(en.out, en.bank, (qid_,), cl_n)
+        r0 = results(en)["questions"][qid_]["runs"][0]
+        check(f"MB4 {label} → not adopted, Gemini called once (spy)", ok_ and rc == 0 and len(cl_n.calls) == 1
+              and r0["kind"] == "api_call" and r0["final_exam_recommendation"]["community"]["qualifies"] is False, (label, log[-300:]))
+    # 其他題型：多選（分布）與陳述句（已記錄、無分布）達門檻 → 直接採用
+    multi_ok = lambda qs: qs["m-multi"]["examtopics_evidence"].update(  # noqa: E731
+        match_status="exact", url="https://www.examtopics.com/discussions/microsoft/view/2-x/", page_answer=["A", "C"],
+        community_vote={"answer": ["A", "C"], "share_percent": 90, "vote_count": 20, "as_of": "2026-10-27",
+                        "distribution": [{"answer": "AC", "percent": 90, "votes": 18}, {"answer": "AD", "percent": 10, "votes": 2}]})
+    stmt_ok = lambda qs: qs["m-stmt"]["examtopics_evidence"].update(  # noqa: E731
+        match_status="exact", url="https://www.examtopics.com/discussions/microsoft/view/3-x/",
+        community_vote={"answer": {"s1": "Yes", "s2": "No"}, "share_percent": 90, "vote_count": 20, "as_of": "2026-10-27"})
+    for label, qid_, edit, expect in (("multiple_choice", "m-multi", multi_ok, ["A", "C"]),
+                                      ("statement_matrix", "m-stmt", stmt_ok, {"s1": "Yes", "s2": "No"})):
+        en = setup(ids=(qid_,), ver_edit=edit)
+        cl_n = FakeClient([])
+        rc, log, made, asked = run_ws(en.out, en.bank, (qid_,), cl_n)
+        r0 = (results(en) or {}).get("questions", {}).get(qid_, {}).get("runs", [{}])[0]
+        check(f"MB8 {label} qualifying → adopted, 0 calls", rc == 0 and not cl_n.calls and not made
+              and r0.get("kind") == "community_adopted" and r0["final_exam_recommendation"]["answer"] == expect, (label, log[-400:]))
+    # completed_run 的標準沒有降低
+    for label, mut in (("packet hash differs", lambda r: r.__setitem__("packet_sha256", "0" * 64)),
+                       ("evaluator version differs", lambda r: r.__setitem__("evaluator_version", "eval-v4")),
+                       ("packet rules version differs", lambda r: r.__setitem__("packet_rules_version", "packet-rules-v1")),
+                       ("api_called true", lambda r: r.__setitem__("api_called", True)),
+                       ("status done", lambda r: r.__setitem__("status", "done")),
+                       ("final source gemini", lambda r: r["final_exam_recommendation"].__setitem__("source", "gemini")),
+                       ("no final answer", lambda r: r["final_exam_recommendation"].__setitem__("answer", None)),
+                       ("qualification not met", lambda r: r["community_qualification"].__setitem__("qualifies", False)),
+                       ("qualification missing", lambda r: r.pop("community_qualification")),
+                       ("has model output", lambda r: r.__setitem__("model_output", {"x": 1}))):
+        r_ = copy.deepcopy(rec)
+        mut(r_)
+        check(f"MB10 community record with {label} → not completed", gj.completed_run([r_], sha_mb, "m") is None)
+    api_rec = results(ep)["questions"]["m-single"]["runs"][0]
+    check("MB6 existing api_call completion still recognised", api_rec["kind"] == "api_call"
+          and gj.completed_run([api_rec], api_rec["packet_sha256"], "gemini-3.1-flash-lite") is api_rec)
+    check("MB6 api_call record is not mistaken for community", not gj.is_community_adoption(api_rec))
+    # 證據包變更 → 舊社群紀錄不被沿用
+    d_res = json.loads((emb.out / "gemini_judgments.json").read_text(encoding="utf-8"))
+    for r_ in d_res["questions"]["m-single"]["runs"]:
+        r_["packet_sha256"] = "0" * 64
+    (emb.out / "gemini_judgments.json").write_text(json.dumps(d_res, ensure_ascii=False), encoding="utf-8")
+    cl_b5 = FakeClient([])
+    rc, log, made, asked = run_ws(emb.out, emb.bank, ("m-single",), cl_b5)
+    runs_after = results(emb)["questions"]["m-single"]["runs"]
+    check("MB7 packet hash mismatch → old record not reused; re-adopted for the current packet, still 0 calls",
+          rc == 0 and not cl_b5.calls and len(runs_after) == 3 and runs_after[-1]["packet_sha256"] == sha_mb
+          and "略過" not in log, log[-300:])
+    rc, log = mainq(["--bank", str(emb.bank), "--output-dir", str(emb.out), "--report"])
+    md_mb = (emb.out / "gemini_judgments.md").read_text(encoding="utf-8")
+    sec_mb = section(md_mb, "m-single")
+    check("MB9 report shows community adoption without API", rc == 0 and "社群採用（達共識門檻，未呼叫 API）" in sec_mb
+          and '最終考試推薦："B"' in sec_mb and "以下為最新一次的成功結果" in sec_mb, sec_mb[:500])
+    rc, rep_b, st_b, why_b = audit_ws(emb.bank, emb.out, emb.dir / "audit_mb")
+    check("MB9 audit counts the community record as completed", st_b["m-single"] == "completed", (st_b.get("m-single"), why_b.get("m-single")))
+finally:
+    gj.eq.load_api_key = real_load_key
 
 # ---- 全域確認 ----
 va.DEFAULT_OUT = real_default_out

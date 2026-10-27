@@ -30,8 +30,10 @@
     python scripts/gemini_judge.py --output-dir output/WS --ids ... --reevaluate   # 以已保存的模型輸出離線重核（不呼叫 API）
 
 所有指令都必須以 --output-dir 明確指定獨立工作區：不得是正式 output/ 或其 gemini_judge/、backups/，
-且必須位於 Git 儲存庫內、已確認受 .gitignore 排除的位置。dry-run 只接受「空白工作區」（只有 verification.json
-快照，以及可能殘留的工作區鎖檔），每個工作區只產生一批證據包。同一工作區同時間只允許一個程序寫入（OS 檔案鎖）。
+且必須位於 Git 儲存庫內、已確認受 .gitignore 排除的位置。dry-run 接受「空白工作區」（只有 verification.json
+快照，以及可能殘留的工作區鎖檔），或由本程式累積多批的工作區（只含本程式建立的結果檔、證據包、請求紀錄與備份，
+既有證據包的快照與題庫須與本批相同）；同一題已有證據包時拒絕，不覆寫。同一工作區同時間只允許一個程序寫入（OS 檔案鎖）。
+--run 對已達社群共識門檻（formal_consensus）的題目直接採用社群答案、不呼叫 Gemini，記錄為 kind=community_adopted。
 
 --run 每題只呼叫一次：不重試、不切換模型；一次最多 5 題。503 / 逾時標為 deferred（連續 2 次即停止），
 429 及 400 / 401 / 403 / 404 立即停止。錯誤訊息一律遮蔽 API Key。
@@ -1725,15 +1727,36 @@ def completed_run(runs: list, packet_sha: str, model: str) -> dict | None:
                 and r.get("model") == model and r.get("packet_sha256") == packet_sha
                 and isinstance(r.get("final_exam_recommendation"), dict)):
             return r
+        if community_adoption_valid(r, packet_sha):
+            return r
     return None
 
 
+COMMUNITY_KIND = "community_adopted"  # M-B：達社群共識門檻、未呼叫 Gemini 而直接採用社群答案的紀錄
+
+
+def is_community_adoption(r) -> bool:
+    """紀錄本身是否為格式完整的社群採用紀錄（不比對證據包雜湊）。"""
+    fin = r.get("final_exam_recommendation") if isinstance(r, dict) else None
+    q = r.get("community_qualification") if isinstance(r, dict) else None
+    return (isinstance(r, dict) and r.get("kind") == COMMUNITY_KIND and r.get("api_called") is False
+            and r.get("status") == COMMUNITY_KIND and r.get("model_output") is None
+            and r.get("evaluator_version") == EVALUATOR_VERSION and r.get("packet_rules_version") == PACKET_RULES_VERSION
+            and isinstance(q, dict) and q.get("qualifies") is True
+            and isinstance(fin, dict) and fin.get("source") == "community" and fin.get("answer") is not None)
+
+
+def community_adoption_valid(r, packet_sha: str) -> bool:
+    """社群採用紀錄可作為完成依據：格式完整、判定與證據包規則版本與目前一致，且證據包雜湊相同。"""
+    return is_community_adoption(r) and r.get("packet_sha256") == packet_sha
+
+
 def effective_run_index(runs: list) -> int:
-    """目前有效推薦所依據的紀錄：最新一筆核對成功（evaluation.status=evaluated）的紀錄；
+    """目前有效推薦所依據的紀錄：最新一筆核對成功（evaluation.status=evaluated）或格式完整的社群採用紀錄；
     沒有任何成功紀錄時，使用最新一筆（其最終推薦為依規則產生的回退或不推薦結果）。"""
     for i in range(len(runs) - 1, -1, -1):
         ev = runs[i].get("evaluation") if isinstance(runs[i], dict) else None
-        if isinstance(ev, dict) and ev.get("status") == "evaluated":
+        if (isinstance(ev, dict) and ev.get("status") == "evaluated") or is_community_adoption(runs[i]):
             return i
     return len(runs) - 1
 
@@ -1754,8 +1777,9 @@ def render_report(results: dict, unfinished: list[dict] | None = None) -> str:
         latest_i, eff_i = len(runs) - 1, effective_run_index(runs)
         latest = runs[latest_i]
         run = runs[eff_i]  # 有效推薦所依據的紀錄（後續失敗不會讓先前成功的推薦消失）
-        eff_ok = (run.get("evaluation") or {}).get("status") == "evaluated"
-        history = " → ".join(f"{i + 1}) {x.get('at')} {'離線重核' if x.get('kind') == 'offline_reevaluation' else 'API'} {x.get('status')}"
+        eff_ok = (run.get("evaluation") or {}).get("status") == "evaluated" or is_community_adoption(run)
+        label = {"offline_reevaluation": "離線重核", COMMUNITY_KIND: "社群採用"}
+        history = " → ".join(f"{i + 1}) {x.get('at')} {label.get(x.get('kind'), 'API')} {x.get('status')}"
                              for i, x in enumerate(runs))
         if eff_ok and eff_i == latest_i:
             latest_note = "以下為最新一次的成功結果"
@@ -1769,7 +1793,8 @@ def render_report(results: dict, unfinished: list[dict] | None = None) -> str:
         er = ev.get("community_recommendation") or ev.get("exam_recommendation") or {}  # 舊紀錄為 exam_recommendation
         oe, pc = ev.get("official_evidence_assessment") or {}, ev.get("product_change") or {}
         fin = run.get("final_exam_recommendation")
-        kind = "離線重核（未呼叫 API）" if run.get("kind") == "offline_reevaluation" else "API 呼叫"
+        kind = {"offline_reevaluation": "離線重核（未呼叫 API）",
+                COMMUNITY_KIND: "社群採用（達共識門檻，未呼叫 API）"}.get(run.get("kind"), "API 呼叫")
         if fin:
             src = {"community": "採用達門檻的社群推薦", "gemini": "採用 Gemini 有效建議",
                    "bank_fallback": f"回退為題庫原始答案（{fin.get('fallback_reason')}）",
@@ -1906,6 +1931,13 @@ def cmd_dry_run(ctx, args, ids: list[str], search=None, fetch=None, doc_urls: di
         return 2
     provenance = snapshot_provenance(snap, ctx.bank_sha)
     trust = provenance["snapshot_trust"]
+    levels = accumulated_trust_levels(ctx.out_dir)  # M-A：同一工作區的各批必須使用相同信任等級的快照
+    if levels and levels != {trust["level"]}:
+        print("dry-run 整批預檢未通過，未發出任何請求、未建立任何證據包：\n  "
+              f"既有證據包的快照信任等級為 {'、'.join(sorted(str(x) for x in levels))}，本批為 {trust['level']}"
+              "（正式基準 output/verification.json 可能已變更，或其位置不再受信任）；拒絕繼續使用此工作區，"
+              "不自動更新快照。請改用新的空白工作區。")
+        return 2
     packet_dir = ctx.out_dir / "gemini_judge" / "packets"
     price, price_note = eq.load_price(args.model)
     total_in = 0
@@ -2021,7 +2053,16 @@ def cmd_run(ctx, args, ids: list[str], client_factory=None) -> int:
     if reuse:
         print("證據包不可送出，整批未呼叫 API、未建立 API client：\n  " + "\n  ".join(reuse))
         return 2
-    plan = [item for item, _ in todo]
+    # M-B：送出任何請求之前，以與最終推薦相同的正式資格（formal_consensus：community_qualification、答案格式、
+    # 快照信任與證據包版本）判斷；達門檻者直接採用社群答案，不建立 client、不呼叫 Gemini
+    community, plan = [], []
+    for item, _ in todo:
+        qid, _, packet, _ = item
+        fc = formal_consensus(packet, ctx.units[qid])
+        if fc["qualifies"]:
+            community.append((item, fc))
+        else:
+            plan.append(item)
     pending = [u for u in unfinished_attempts(ctx.out_dir, existing) if u.get("question_id") in {q for q, *_ in plan}]
     for u in pending:
         print(f"  ⚠ {u['question_id']} 有未完成的請求紀錄（{u.get('started_at')}，{u['file']}）：先前的請求可能已送出、"
@@ -2030,23 +2071,50 @@ def cmd_run(ctx, args, ids: list[str], client_factory=None) -> int:
     total_in = sum(estimate_input_tokens(p) for _, _, p, _ in plan)
     cost = eq.cost_usd(price, total_in, args.assume_output_tokens * len(plan))
     print("=" * 64)
-    print(f"Gemini 判讀計畫｜模型 {args.model}｜{args.tier}｜{len(plan)} 題 = {len(plan)} 次請求（不重試）")
+    print(f"Gemini 判讀計畫｜模型 {args.model}｜{args.tier}｜{len(plan)} 題 = {len(plan)} 次請求（不重試）"
+          f"｜社群採用 {len(community)} 題（不呼叫 API）")
+    for (qid, path, _, sha), fc in community:
+        print(f"  = {qid}  {path.name}  {sha[:12]}…｜社群共識 {fc['share_exact']:.4g}%／{fc['total_votes']} 票，直接採用，不呼叫 API")
     for qid, path, _, sha in plan:
         print(f"  - {qid}  {path.name}  {sha[:12]}…")
-    print(f"  預估輸入約 {total_in:,} token；付費層估計 {'—' if cost is None else f'約 US${cost:.4f}'}；{price_note}")
-    if args.tier == "free":
-        print("  ※ 免費層：不計費，但送出的題目與證據可能被用於改善 Google 產品。")
-    if not confirm("確認送出以上證據包？輸入 yes 繼續："):
-        print("已取消，未呼叫 Gemini API。")
-        return 2
+    if plan:
+        print(f"  預估輸入約 {total_in:,} token；付費層估計 {'—' if cost is None else f'約 US${cost:.4f}'}；{price_note}")
+        if args.tier == "free":
+            print("  ※ 免費層：不計費，但送出的題目與證據可能被用於改善 Google 產品。")
+        if not confirm("確認送出以上證據包？輸入 yes 繼續："):
+            print("已取消，未呼叫 Gemini API，也未寫入社群採用紀錄。")
+            return 2
+    backup_dir = ctx.out_dir / "backups"
+    session_backed_up = False  # 每次 --run 只在第一次實際寫入前備份一次既有結果檔
+    for (qid, path, packet, sha), fc in community:
+        final = final_recommendation(ctx.units[qid], packet, None, "not_called", None)
+        if final.get("source") != "community":  # 防禦：與 formal_consensus 應一致；不一致即停止，不寫入、不送出
+            print(f"{qid}：社群資格判斷與最終推薦不一致，已停止，未寫入、未呼叫 API。")
+            return 2
+        run = {"at": va.now_iso(), "kind": COMMUNITY_KIND, "api_called": False, "attempt_id": None,
+               "model": None, "tier": None, "prompt_version": None, "evaluator_version": EVALUATOR_VERSION,
+               "packet_file": path.name, "packet_sha256": sha, "packet_version": packet.get("packet_version"),
+               "packet_rules_version": packet.get("packet_rules_version"), "packet_summary": packet_summary(packet),
+               "documents": [{k: d[k] for k in ("doc_id", "title", "url", "origin", "retrieved_at")}
+                             for d in packet["microsoft_learn"]["documents"]],
+               "status": COMMUNITY_KIND, "http_status": None, "error": None,
+               "usage": {"input_tokens": 0, "output_tokens": 0, "thoughts_tokens": 0, "total_tokens": 0},
+               "model_output": None, "evaluation": None, "cost_usd_estimate": 0,
+               "community_qualification": fc, "final_exam_recommendation": final}
+        made = append_run(results_path, backup_dir, qid, run, backup=not session_backed_up)
+        if not session_backed_up and made:
+            print(f"  已備份既有結果檔（本次執行僅備份一次）：{made}")
+        session_backed_up = True
+        print(f"  {qid}：社群採用（未呼叫 API）｜最終推薦 {fmt(final['answer'])}（community）")
+    if not plan:
+        print(f"未建立 API client、未呼叫 API。結果：{results_path}（可用 --report 產生 Markdown）")
+        return 0
     api_key = eq.load_api_key()
     if not api_key:
         print("找不到 GEMINI_API_KEY。")
         return 2
     client = (client_factory or (lambda k: eq.make_client(k, args.timeout)))(api_key)
-    backup_dir = ctx.out_dir / "backups"
     transient, stopped = 0, None
-    session_backed_up = False  # 每次 --run 只在第一次實際寫入前備份一次既有結果檔
     for n, (qid, path, packet, sha) in enumerate(plan, start=1):
         if n > 1 and args.min_interval > 0:
             time.sleep(args.min_interval)
@@ -2273,31 +2341,117 @@ def git_ignore_problems(output_dir: Path) -> list[str]:
     return []
 
 
-# ---- F-03：新批次只接受空白工作區 ------------------------------------------------------------
+# ---- F-03／M-A：dry-run 只接受空白工作區，或由本程式累積多批的工作區 ------------------------------------
 SNAPSHOT_NAME = "verification.json"
 EMPTY_WORKSPACE_ALLOWED = (SNAPSHOT_NAME, LOCK_NAME)
-EMPTY_WORKSPACE_RULE = ("空白工作區＝目錄只包含一般檔案 verification.json（快照），以及可能殘留的工作區鎖檔 "
-                        f"{LOCK_NAME}；不得有判讀紀錄、證據包、報告、備份或其他任何檔案或目錄")
+WORKSPACE_TOP_FILES = (SNAPSHOT_NAME, LOCK_NAME, "gemini_judgments.json", "gemini_judgments.md")
+_STAMP = r"\d{8}-\d{6}-\d{6}"                                   # stamp() 的格式
+PACKET_FILE = re.compile(rf"^[^.\\/]+\.{_STAMP}\.json$")         # save_packet()：<題號>.<時間>.json
+ATTEMPT_FILE = re.compile(rf"^[^.\\/]+\.{_STAMP}\.[0-9a-f]{{8}}\.json$")  # record_attempt()：<題號>.<時間>.<8 碼>.json
+BACKUP_FILE = re.compile(rf"^gemini_judgments\.{_STAMP}\.json$")  # va.backup_file()：結果檔備份
+EMPTY_WORKSPACE_RULE = (
+    "可接受的工作區＝空白工作區（只有一般檔案 verification.json 快照，以及可能殘留的工作區鎖檔 "
+    f"{LOCK_NAME}），或由本程式累積多批的工作區：另外只能有 gemini_judgments.json（可解析的結果檔）、"
+    "gemini_judgments.md、gemini_judge/packets/<題號>.<時間>.json、gemini_judge/attempts/<題號>.<時間>.<8 碼>.json、"
+    "backups/gemini_judgments.<時間>.json；其他任何檔案、目錄、暫存檔、未完成的寫入或連結一律拒絕")
+
+
+def _plain_file(entry) -> bool:
+    return entry.is_file(follow_symlinks=False)
+
+
+def _plain_dir(entry) -> bool:
+    return entry.is_dir(follow_symlinks=False) and not entry.is_symlink()
 
 
 def workspace_entry_problems(output_dir: Path) -> list[str]:
-    """dry-run（新批次）只接受空白工作區（見 EMPTY_WORKSPACE_RULE）。只列出目錄內容；不清空、不搬移、不複製。
+    """dry-run 的工作區內容檢查（白名單，見 EMPTY_WORKSPACE_RULE）。只列出目錄內容；不清空、不搬移、不複製。
+    累積工作區中既有證據包的一致性另由 accumulated_packet_problems() 檢查。
     工作區不存在時不在此回報（由快照檢查回報缺少 verification.json）。"""
     d = Path(output_dir)
     if not d.exists():
         return []
     if not d.is_dir():
         return [f"--output-dir 不是目錄（{d}）"]
-    extra = []
+    bad = []
+
+    def scan_files(sub, prefix: str, pattern) -> None:
+        for x in sorted(os.scandir(sub), key=lambda y: y.name):
+            if not (_plain_file(x) and pattern.match(x.name)):
+                bad.append(prefix + x.name + ("/" if x.is_dir(follow_symlinks=False) else ""))
+
     for entry in sorted(os.scandir(d), key=lambda x: x.name):
-        if entry.name in EMPTY_WORKSPACE_ALLOWED and entry.is_file(follow_symlinks=False):
+        if entry.name in WORKSPACE_TOP_FILES and _plain_file(entry):
             continue
-        extra.append(entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""))
-    if extra:
-        shown = "、".join(extra[:8]) + ("…" if len(extra) > 8 else "")
-        return [f"工作區不是空白工作區（另有：{shown}）；新批次不得混入已有判讀紀錄或證據包的工作區。"
+        if entry.name == "gemini_judge" and _plain_dir(entry):
+            for sub in sorted(os.scandir(entry.path), key=lambda y: y.name):
+                if sub.name == "packets" and _plain_dir(sub):
+                    scan_files(sub.path, "gemini_judge/packets/", PACKET_FILE)
+                elif sub.name == "attempts" and _plain_dir(sub):
+                    scan_files(sub.path, "gemini_judge/attempts/", ATTEMPT_FILE)
+                else:
+                    bad.append("gemini_judge/" + sub.name + ("/" if sub.is_dir(follow_symlinks=False) else ""))
+            continue
+        if entry.name == "backups" and _plain_dir(entry):
+            scan_files(entry.path, "backups/", BACKUP_FILE)
+            continue
+        bad.append(entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""))
+    results = d / "gemini_judgments.json"
+    if results.is_file() and not results.is_symlink() and "gemini_judgments.json" not in bad:
+        try:
+            data = json.loads(results.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("meta"), dict) or not isinstance(data.get("questions"), dict):
+                raise ValueError("缺少 meta 或 questions 物件")
+        except (OSError, UnicodeDecodeError, ValueError):
+            bad.append("gemini_judgments.json（格式不符）")
+    if bad:
+        shown = "、".join(bad[:8]) + ("…" if len(bad) > 8 else "")
+        return [f"工作區不是空白工作區，且含有本程式不會建立或格式不符的項目（{shown}）；新批次不得混入來源不明的資料。"
                 f"{EMPTY_WORKSPACE_RULE}。請改用新的空白工作區；程式不會清空、搬移或複製任何資料。"]
     return []
+
+
+def accumulated_packet_problems(output_dir: Path, snapshot_sha: str, bank_sha: str) -> list[str]:
+    """累積工作區（M-A）：既有證據包必須全部可驗證、為目前版本，且建立時使用的 verification.json 快照與題庫
+    都與本批相同。任何不一致即拒絕繼續使用此工作區——不自動更新快照、不修改或取代既有證據包。
+    （舊 trial 工作區的 v1 證據包會在此被拒絕，不會被自動轉換成可重用工作區。）"""
+    pdir = Path(output_dir) / "gemini_judge" / "packets"
+    if not pdir.is_dir():
+        return []
+    probs = []
+    for f in sorted(pdir.glob("*.json")):
+        try:
+            packet, _, ok = load_packet(f)
+        except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as err:
+            probs.append(f"{f.name}：無法讀取（{type(err).__name__}）")
+            continue
+        gen = packet_generation(packet) if isinstance(packet, dict) else "unknown"
+        if not ok:
+            probs.append(f"{f.name}：雜湊不符")
+        elif gen != "current":
+            probs.append(f"{f.name}：證據包為{GENERATION_LABEL[gen]}（packet_version={packet.get('packet_version')}）")
+        else:
+            if f.name.split(".", 1)[0] != packet.get("question_id"):
+                probs.append(f"{f.name}：檔名與證據包題號不符")
+            if packet.get("snapshot_sha256") != snapshot_sha:
+                probs.append(f"{f.name}：建立時使用的 verification.json 快照與目前快照不同")
+            if packet.get("bank_sha256") != bank_sha:
+                probs.append(f"{f.name}：建立時的題庫與目前題庫不同")
+    if probs:
+        shown = "；".join(probs[:6]) + ("…" if len(probs) > 6 else "")
+        return [f"既有累積工作區的證據包與本批條件不一致，拒絕繼續使用此工作區（不自動更新快照、不修改既有證據包）：{shown}。"
+                "請改用新的空白工作區。"]
+    return []
+
+
+def accumulated_trust_levels(output_dir: Path) -> set[str]:
+    """累積工作區中既有證據包的快照信任等級（只在 accumulated_packet_problems() 通過後使用）。"""
+    pdir = Path(output_dir) / "gemini_judge" / "packets"
+    levels = set()
+    for f in sorted(pdir.glob("*.json")) if pdir.is_dir() else []:
+        packet, _, _ = load_packet(f)
+        levels.add((packet.get("snapshot_trust") or {}).get("level"))
+    return levels
 
 
 # ---- F-08：verification.json 快照的三層信任：格式有效、來源一致、內容可信 -------------------------------
@@ -2374,8 +2528,10 @@ def dry_run_preflight(output_dir: Path | None, bank_path: Path) -> list[str]:
     """dry-run 的安全前置檢查（在建立目錄、寫入與任何網路請求之前執行；唯讀）：
     A. 必須明確指定 --output-dir，且不得是正式 output/、其 gemini_judge/ 或 backups/（official_path_problems）。
     B. 工作區必須位於已確認受 .gitignore 排除的位置（git_ignore_problems）。
-    C. 工作區必須是空白工作區（workspace_entry_problems）。
-    D. verification.json 快照格式有效、來源一致（load_snapshot_checked）。"""
+    C. 工作區必須是空白工作區，或由本程式累積多批的工作區（workspace_entry_problems，白名單）。
+    D. verification.json 快照格式有效、來源一致（load_snapshot_checked）。
+    E. 累積工作區：既有證據包全部為目前版本、雜湊正確，且快照與題庫都與本批相同（accumulated_packet_problems）。
+    同一題已有證據包時由 dry_run_batch_problems() 拒絕，不覆寫。"""
     if output_dir is None:
         return ["dry-run 必須以 --output-dir 明確指定獨立工作區（例如 output/gemini_trialN-日期），不會使用預設的正式 output/。"]
     for check_fn in (lambda: official_path_problems(output_dir, "dry-run"), lambda: git_ignore_problems(output_dir),
@@ -2383,7 +2539,11 @@ def dry_run_preflight(output_dir: Path | None, bank_path: Path) -> list[str]:
         problems = check_fn()
         if problems:
             return problems
-    return load_snapshot_checked(output_dir, eq.sha256_file(bank_path))[0]
+    bank_sha = eq.sha256_file(bank_path)
+    problems, snap = load_snapshot_checked(output_dir, bank_sha)
+    if problems:
+        return problems
+    return accumulated_packet_problems(output_dir, snap["sha256"], bank_sha)
 
 
 def mode_preflight(mode: str, output_dir: Path | None, bank_path: Path) -> list[str]:
