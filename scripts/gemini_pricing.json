@@ -1,0 +1,40 @@
+{
+  "_comment": "Gemini API 價格（每 1M tokens，美元），僅供 enrich_questions.py 估算；實際以 Google 帳單為準。價格變動時請更新本檔。",
+  "source": "https://ai.google.dev/gemini-api/docs/pricing",
+  "checked_on": "2026-10-22",
+  "currency": "USD",
+  "models": {
+    "gemini-3.1-flash-lite": {
+      "paid": {
+        "input": 0.25,
+        "output_including_thinking": 1.50,
+        "batch_input": 0.125,
+        "batch_output_including_thinking": 0.75
+      },
+      "free_tier": {
+        "available": true,
+        "price": "輸入、輸出皆不計費",
+        "data_used_to_improve_products": true,
+        "rate_limits": "依專案而定，請於 AI Studio 查看；RPD 於太平洋時間午夜重置"
+      },
+      "valid_until": null,
+      "note": "官方定價頁未列出此模型的日期性調價；Google Search grounding 本工具不使用"
+    },
+    "gemini-3.8-flash": {
+      "paid": {
+        "input": 0.75,
+        "output_including_thinking": 3.75,
+        "batch_input": 0.375,
+        "batch_output_including_thinking": 1.875
+      },
+      "free_tier": {
+        "available": true,
+        "price": "輸入、輸出皆不計費",
+        "data_used_to_improve_products": true,
+        "rate_limits": "依專案而定，請於 AI Studio 查看"
+      },
+      "valid_until": "2026-12-31",
+      "note": "2027-01-01 起付費層 input 1.50 / output 7.50"
+    }
+  }
+}
