@@ -2927,6 +2927,142 @@ for qid, u in TU.items():
 check("R5 strategy note states bank fallback for all types", "題庫原始答案（所有題型）" in gj.STRATEGY_NOTE)
 check("R6 versions unchanged", (gj.PROMPT_VERSION, gj.EVALUATOR_VERSION) == ("judge-v4", "eval-v5"))
 
+# ===========================================================================
+# 14. learn-query-v2：AIP 併入 Purview（僅檢索）、題幹產品例外、題組情境查詢與段落評分
+# ===========================================================================
+SPR = gj.SEARCH_PRODUCT_RULES
+check("Q0 query strategy bumped, judge/eval/packet versions unchanged",
+      gj.PACKET_VERSIONS["query_strategy_version"] == "learn-query-v2" and gj.PACKET_VERSIONS["packet_version"] == 2
+      and gj.PACKET_RULES_VERSION == "packet-rules-v2" and (gj.PROMPT_VERSION, gj.EVALUATOR_VERSION) == ("judge-v4", "eval-v5"))
+names = lambda ps: [p["name"] for p in ps]  # noqa: E731
+for label, text, want in (("Azure Information Protection", "Configure Azure Information Protection scanner.", ["Microsoft Purview"]),
+                          ("Microsoft Information Protection", "Use Microsoft Information Protection labels.", ["Microsoft Purview"]),
+                          ("AIP acronym", "Deploy the AIP scanner.", ["Microsoft Purview"]),
+                          ("Purview", "Use Microsoft Purview DLP.", ["Microsoft Purview"]),
+                          ("AIP inside a word is not a match", "AIPS and MAIP are unrelated.", []),
+                          ("Defender portal still XDR", "Open the Microsoft Defender portal.", ["Microsoft Defender XDR"])):
+    check(f"Q1 search rules: {label}", names(gj.detect_products(text, SPR)) == want, names(gj.detect_products(text, SPR)))
+check("Q1 judgment-side default rules unchanged (AIP not a product there)",
+      names(gj.detect_products("Configure Azure Information Protection scanner.")) == []
+      and [r[1] for r in gj.PRODUCT_RULES if r[0] == "Microsoft Purview"] == ["Purview"])
+
+
+def aip_unit(qid, stem, options, case=None):
+    q = {"id": qid, "type": "single_choice", "question": stem,
+         "options": [{"id": chr(65 + i), "text": t} for i, t in enumerate(options)], "answer": "A"}
+    return gj.eq.Unit(qid, case["id"] if case else qid, "single_choice", q, case)
+
+
+u_aip = aip_unit("q-aip", "You need to implement the Azure Information Protection requirements. What should you configure first?",
+                 ["Device health reports in Microsoft 365 Defender portal", "scanner clusters in Azure Information Protection",
+                  "content scan jobs in Azure Information Protection", "Advanced features in Microsoft 365 Defender portal"])
+qs_a, pr_a, _ = gj.build_queries(u_aip)
+check("Q2 AIP in stem → Purview primary", names(pr_a)[0] == "Microsoft Purview" and all(q.startswith("Microsoft Purview") for q in qs_a), (names(pr_a), qs_a))
+u_mdca = aip_unit("q-mdca", "You need to configure Microsoft Defender for Cloud Apps to generate alerts for external sharing.",
+                  ["Settings > Azure Information Protection > scan new files", "Settings > Azure Information Protection > ignore labels",
+                   "Investigate > Files > filter", "Microsoft Information Protection > policy"])
+qs_m, pr_m, _ = gj.build_queries(u_mdca)
+check("Q3 AIP only in options, stem names another product → that product stays primary, Purview secondary",
+      names(pr_m)[0] == "Microsoft Defender for Cloud Apps" and "Microsoft Purview" in names(pr_m)[1:], names(pr_m))
+check("Q3 Purview paths kept as secondary", any("/purview/" in p["paths"] and "/azure/information-protection/" in p["paths"] for p in pr_m))
+check("Q3 without the exception Purview would lead (count-based)",
+      names(gj.detect_products(gj.unit_texts(u_mdca)[0] + " " + " ".join(t for _, t in gj.unit_texts(u_mdca)[1]), SPR))[0] == "Microsoft Purview")
+u_opt_only = aip_unit("q-optonly", "What should you configure first?", ["Azure Information Protection scanner", "Other option"])
+check("Q3 no product in stem → ordering unchanged (Purview from options stays)", names(gj.build_queries(u_opt_only)[1])[0] == "Microsoft Purview")
+for path, ok_ in (("/en-us/purview/deploy-scanner-configure-install", True), ("/en-us/azure/information-protection/x", True),
+                  ("/en-us/defender-office-365/x", False)):
+    got = gj.allowed_path("https://learn.microsoft.com" + path, pr_a, [])[0]
+    check(f"Q4 allowed_path with AIP products: {path} → {ok_}", got is ok_)
+mt = gj.evaluation_matchers(u_aip)[0]
+check("Q5 judgment matchers keep 'Information Protection' wording (unchanged evaluation)",
+      "Information" in mt["B"]["keywords"] and "Protection" in mt["B"]["keywords"], mt["B"])
+
+CASE_NW = {"id": "case-nw", "type": "case_study", "caseInfo": {"title": "Testlet 9 · Northwind Traders", "sections": [
+    {"title": "Existing Environment", "content": "**Devices**\nThe sales team at Northwind uses only iOS devices for daily work.\n"
+                                                 "All users sign in with Microsoft Entra ID accounts every day."},
+    {"title": "Problem Statements", "content": "**Current Problems**\nIn the past, the sales team experienced phishing attacks on their devices.\n"
+                                               "The marketing team has had several incidents in which vendors uploaded files that contain malware "
+                                               "to SharePoint Online sites.\nThe executive team at Northwind suspects a security breach."}]}}
+
+
+def case_unit(qid, stem, options, case=CASE_NW):
+    return aip_unit(qid, stem, options, case)
+
+
+u_cs = case_unit("c-team", "The issue for which team can be resolved by using Microsoft Defender for Office 365?",
+                 ["executive", "marketing", "sales"])
+st_cs, tg_cs = gj.unit_texts(u_cs)
+pr_cs = gj.search_products(st_cs, tg_cs)
+sents = gj.case_context_sentences(u_cs, pr_cs, tg_cs)
+check("Q6 case sentences: at most 3, problem sentences chosen per team", 0 < len(sents) <= gj.MAX_CASE_SENTENCES
+      and any("phishing" in s for s in sents) and any("malware" in s for s in sents)
+      and not any("uses only iOS" in s for s in sents), sents)
+qs_cs = gj.build_queries(u_cs)[0]
+case_qs = qs_cs[:len(sents)]
+check("Q7 case queries come first and start with the primary product", all(q.startswith("Microsoft Defender for Office 365") for q in case_qs)
+      and any("malware" in q or "SharePoint" in q for q in case_qs), qs_cs)
+check("Q7 company / team / case-noise words excluded from case queries",
+      not any(w in q.lower().split() for q in case_qs for w in ("northwind", "traders", "testlet", "sales", "marketing", "executive", "team")),
+      case_qs)
+check("Q8 query count and length limits", len(qs_cs) <= gj.MAX_QUERIES and all(len(q.split()) <= gj.QUERY_MAX_WORDS for q in qs_cs))
+u_many = case_unit("c-many", "Which planned requirement should you meet by using Microsoft Defender for Office 365?",
+                   [f"option {w} malware SharePoint phishing" for w in "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi".split()])
+qs_many = gj.build_queries(u_many)[0]
+check("Q8 many options + case context still capped", len(qs_many) <= gj.MAX_QUERIES and all(len(q.split()) <= gj.QUERY_MAX_WORDS for q in qs_many),
+      (len(qs_many), qs_many))
+u_noref = case_unit("c-noref", "Which Microsoft Defender for Office 365 policy blocks malicious attachments?", ["Safe Attachments", "Safe Links"])
+u_noref_plain = aip_unit("c-noref", u_noref.question["question"], ["Safe Attachments", "Safe Links"])
+st_nr, tg_nr = gj.unit_texts(u_noref)
+check("Q9 case sub-question whose stem does not reference the case → no case sentences, queries unchanged",
+      gj.case_context_sentences(u_noref, gj.search_products(st_nr, tg_nr), tg_nr) == []
+      and gj.build_queries(u_noref)[0] == gj.build_queries(u_noref_plain)[0])
+check("Q9 non-case unit → no case sentences", gj.case_context_sentences(unit(env, "m-single"), [], gj.unit_texts(unit(env, "m-single"))[1]) == [])
+check("Q9 existing non-case fixtures: queries still start with a product", all(
+    all(any(q.startswith(p["name"]) for p in gj.build_queries(units[qid])[1]) for q in gj.build_queries(units[qid])[0])
+    for qid in ("m-single", "m-multi", "m-stmt", "m-tactic", "m-mitre")))
+
+# 假的搜尋與擷取：/purview/deploy-scanner 通過篩選並保留段落；題組情境詞讓相關段落入選
+SCANNER_URL = "https://learn.microsoft.com/en-us/purview/deploy-scanner-configure-install"
+OFFICE_URL = "https://learn.microsoft.com/en-us/defender-office-365/unrelated-page"
+SCANNER_TEXT = ("Before you start, create scanner clusters in the Microsoft Purview portal so the information protection scanner can run. "
+                "Each scanner cluster groups scanner nodes. Then create content scan jobs that list the repositories to scan. "
+                "Content scan jobs define schedules and data repositories for the scanner. Pricing and licensing vary by plan.")
+
+
+def fake_search_aip(q, top=5):
+    return [{"title": "Configure and install the information protection scanner", "url": SCANNER_URL},
+            {"title": "Unrelated Office page", "url": OFFICE_URL}]
+
+
+def fake_fetch_aip(u):
+    if u == SCANNER_URL:
+        return SCANNER_TEXT
+    raise OSError("not found")
+
+
+ml_aip = gj.gather_learn(u_aip, None, search=fake_search_aip, fetch=fake_fetch_aip, delay=0)
+dec = {c["url"]: c["decision"] for c in ml_aip["candidates_considered"]}
+check("Q10 /purview/deploy-scanner accepted and kept with passages", dec.get(SCANNER_URL) == "kept"
+      and any(d["url"] == SCANNER_URL and d["passages"] for d in ml_aip["documents"]), (dec, ml_aip["documents"]))
+check("Q10 other product path still rejected", dec.get(OFFICE_URL) == "rejected:other_product_path", dec)
+check("Q10 scanner passages cover the scanner options", ml_aip["option_coverage"].get("B") is True and ml_aip["option_coverage"].get("C") is True,
+      ml_aip["option_coverage"])
+SAFE_URL = "https://learn.microsoft.com/en-us/defender-office-365/safe-attachments-for-spo-odfb-teams-about"
+SAFE_TEXT = ("Safe Attachments for SharePoint detects malware in files that external vendors uploaded to SharePoint Online sites. "
+             "Detected files are locked so users can't open them. Admins can review the files in quarantine. Feedback was helpful.")
+ml_cs = gj.gather_learn(u_cs, None, search=lambda q, top=5: [{"title": "Safe Attachments for SharePoint", "url": SAFE_URL}],
+                        fetch=lambda u: SAFE_TEXT if u == SAFE_URL else (_ for _ in ()).throw(OSError("x")), delay=0)
+ps_cs = [p for d in ml_cs["documents"] for p in d["passages"]]
+check("Q11 case keywords let the relevant passage qualify (scoring rules unchanged)", ml_cs["status"] == "found" and ps_cs
+      and any("SharePoint" in p["matched_terms"] or "malware" in p["matched_terms"] for p in ps_cs), (ml_cs["status"], ps_cs))
+ml_cs_plain = gj.gather_learn(aip_unit("c-team", u_cs.question["question"], ["executive", "marketing", "sales"]), None,
+                              search=lambda q, top=5: [{"title": "Safe Attachments for SharePoint", "url": SAFE_URL}],
+                              fetch=lambda u: SAFE_TEXT if u == SAFE_URL else (_ for _ in ()).throw(OSError("x")), delay=0)
+check("Q11 same question without case context → passage not selected (shows the case terms are what qualify it)",
+      not ml_cs_plain["documents"], ml_cs_plain["documents"])
+check("Q12 path filter terms unchanged: case tech terms do not widen allowed_path",
+      gj.allowed_path("https://learn.microsoft.com/en-us/sharepoint/some-page", pr_cs, [])[0] is False)
+
 # ---- 全域確認 ----
 va.DEFAULT_OUT = real_default_out
 check("P1 fake official output untouched after setup", tree(P1_BASE) == official_before)

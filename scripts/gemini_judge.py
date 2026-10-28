@@ -80,7 +80,7 @@ eq = va.eq
 PACKET_VERSIONS = {
     "packet_version": 2,                          # 1 = 舊版（沒有快照來源與文件擷取紀錄）
     "packet_rules_version": "packet-rules-v2",    # 快照信任、社群資格閘門、版本欄位的規則
-    "query_strategy_version": "learn-query-v1",   # build_queries() / gather_learn() 的檢索與篩選策略
+    "query_strategy_version": "learn-query-v2",   # build_queries() / gather_learn() 的檢索與篩選策略（v2：AIP 規則、題組情境查詢）
     "document_cleaning_version": "learn-clean-v1",  # fetch_learn_page() 的 HTML 轉文字與 clean_learn_text()
 }
 PACKET_VERSION = PACKET_VERSIONS["packet_version"]
@@ -145,6 +145,12 @@ PRODUCT_RULES = [
     ("Microsoft Security Copilot", r"Security Copilot", ["Security Copilot"], ["/copilot/security/"]),
     ("Azure Arc", r"Azure Arc", ["Azure Arc"], ["/azure/azure-arc/"]),
 ]
+# 官方文件檢索專用的產品規則（learn-query-v2）：與 PRODUCT_RULES 相同，只把 AIP（Azure / Microsoft Information
+# Protection，已併入 Purview）併入 Purview。判讀端（evaluation_matchers 等）仍使用 PRODUCT_RULES，核對結果不受影響。
+PURVIEW_SEARCH_PATTERN = r"Purview|(?:Azure|Microsoft) Information Protection|\bAIP\b"
+SEARCH_PRODUCT_RULES = [("Microsoft Purview", PURVIEW_SEARCH_PATTERN, ["Purview", "Information Protection"],
+                         ["/purview/", "/azure/information-protection/"]) if r[0] == "Microsoft Purview" else r
+                        for r in PRODUCT_RULES]
 ALWAYS_EXCLUDED_PATHS = ("/training/", "/credentials/", "/answers/", "/shows/", "/whats-new", "/release-notes")
 PLACEHOLDER = re.compile(r"^(?:[A-Z][a-z]+|[A-Z]{1,3})\d+$")       # Tactic1、User2、VM1 等佔位詞
 WEAK_ACRONYMS = {"API", "AND", "THE", "NOT", "URL"}
@@ -364,15 +370,29 @@ def unit_texts(unit) -> tuple[str, list[tuple[str, str]]]:
     return stem, targets
 
 
-def detect_products(text: str) -> list[dict]:
-    """依出現次數（其次為首次出現位置）排序；第一個視為主要產品。"""
+def detect_products(text: str, rules: list | None = None) -> list[dict]:
+    """依出現次數（其次為首次出現位置）排序；第一個視為主要產品。rules 預設為 PRODUCT_RULES（判讀端）；
+    官方文件檢索傳入 SEARCH_PRODUCT_RULES。每個結果記錄所用的比對式（pattern），供 strip_products() 使用。"""
     found = []
-    for name, pat, aliases, paths in PRODUCT_RULES:
+    for name, pat, aliases, paths in (rules or PRODUCT_RULES):
         hits = list(re.finditer(pat, text))
         if hits:
-            found.append({"name": name, "aliases": aliases, "paths": paths, "count": len(hits), "pos": hits[0].start()})
+            found.append({"name": name, "aliases": aliases, "paths": paths, "count": len(hits), "pos": hits[0].start(),
+                          "pattern": pat})
     found.sort(key=lambda p: (-p["count"], p["pos"]))
     return found
+
+
+def search_products(stem: str, targets: list[tuple[str, str]]) -> list[dict]:
+    """官方文件檢索用的產品（learn-query-v2）：以 SEARCH_PRODUCT_RULES 辨識。唯一的排序例外：Purview／AIP 只出現在
+    選項、而題幹已明確提到其他產品時，題幹中的產品維持在前、Purview 改列其後（仍保留其允許路徑）；
+    題幹本身提到 Purview／AIP 時不調整。其他產品的排序規則不變。"""
+    products = detect_products(stem + " " + " ".join(t for _, t in targets), SEARCH_PRODUCT_RULES)
+    if products and products[0]["name"] == "Microsoft Purview" and not re.search(PURVIEW_SEARCH_PATTERN, stem):
+        in_stem = {p["name"] for p in detect_products(stem, SEARCH_PRODUCT_RULES)}
+        if in_stem:
+            products = [p for p in products if p["name"] in in_stem] + [p for p in products if p["name"] not in in_stem]
+    return products
 
 
 def tokens(text: str) -> list[str]:
@@ -401,7 +421,7 @@ def camel_words(term: str) -> str:
 
 def strip_products(text: str, products: list[dict]) -> str:
     for p in products:
-        text = re.sub(PRODUCT_RULES[[r[0] for r in PRODUCT_RULES].index(p["name"])][1], " ", text)
+        text = re.sub(p.get("pattern") or PRODUCT_RULES[[r[0] for r in PRODUCT_RULES].index(p["name"])][1], " ", text)
     return re.sub(r"\bMicrosoft\b", " ", text)
 
 
@@ -435,10 +455,88 @@ def target_matcher(text: str, products: list[dict]) -> dict:
             "tech": tech_terms(t)}
 
 
+# 題組子題：題幹指向題組情境（需求、問題、規劃、哪個團隊……）時，才從情境中挑出相關句子補充 Learn 查詢與段落評分。
+# 只影響官方文件檢索；送給 Gemini 的題目內容（question_view，已含 case_study）不變。
+CASE_REFERENCE = re.compile(r"\b(?:requirements?|issues?|problems?|planned|technical|business|which team|for which)\b", re.I)
+MAX_CASE_SENTENCES = 3
+CASE_NOISE = set("""team teams member members user users company department departments past several currently plan plans
+planned requirement requirements issue issues problem problems resolve resolved recently addition also only all must has
+have had been being""".split())
+CASE_ISSUE_STEM = re.compile(r"\b(?:issues?|problems?)\b", re.I)
+CASE_ISSUE_TERMS = re.compile(r"\b(?:problems?|issues?|incidents?|attacks?|phishing|malware|breach\w*|threats?|compromis\w*|suspicious)\b",
+                              re.I)
+
+
+def case_sentences(unit) -> list[str]:
+    """題組情境（caseInfo.sections[].content）切成句子；粗體小標與換行視為分隔，太短的片段略過。"""
+    out = []
+    for sec in ((unit.case or {}).get("caseInfo") or {}).get("sections") or []:
+        content = re.sub(r"\*\*[^*\n]+\*\*", "\n", str(sec.get("content") or "") if isinstance(sec, dict) else "")
+        for line in content.splitlines():
+            for s in re.split(r"(?<=[.!?])\s+", line.strip()):
+                s = " ".join(s.lstrip("-•* ").split())
+                if len(s.split()) >= 4:
+                    out.append(s)
+    return out
+
+
+def _case_excluded_words(unit, targets: list[tuple[str, str]]) -> set[str]:
+    """不可當成查詢詞的字：選項標籤（例如團隊名稱）與題組標題中的公司名稱。"""
+    title = ((unit.case or {}).get("caseInfo") or {}).get("title") or ""
+    words = {w.lower() for _, t in targets for w in tokens(t or "")} | {w.lower() for w in tokens(title)}
+    return words | CASE_NOISE
+
+
+def case_context_sentences(unit, products: list[dict], targets: list[tuple[str, str]]) -> list[str]:
+    """最多 MAX_CASE_SENTENCES 句與本題相關的題組情境；非題組子題或題幹未指向情境時回傳空清單。
+    相關性：提到選項文字（每個 2 分）、提到主要產品（2 分）、題幹關鍵詞（每個 1 分）、含技術詞（1 分）；
+    題幹問的是 issue／problem 時，描述問題的句子（攻擊、釣魚、惡意程式、外洩……）另加 2 分。
+    先挑能涵蓋新選項的句子（避免全部集中在同一選項），再依分數補滿；保留情境中的原始順序。"""
+    q = unit.question.get("question", "")
+    if unit.case is None or not CASE_REFERENCE.search(q):
+        return []
+    excluded = _case_excluded_words(unit, targets)
+    stem_kw = [w for w in keywords(strip_products(q, products), 12) if w.lower() not in CASE_NOISE]
+    primary = products[0] if products else None
+    prim_pat = primary.get("pattern") if primary else None
+    labels = [(tid, t) for tid, t in targets if t and len(t.strip()) >= 3]
+    cands = []
+    for i, s in enumerate(case_sentences(unit)):
+        opts = {tid for tid, t in labels if has_phrase(s, t)}
+        prod = bool(prim_pat and re.search(prim_pat, s))
+        kw = sum(1 for w in stem_kw if has_phrase(s, w))
+        tech = bool([t for t in tech_terms(strip_products(s, products)) if t.lower() not in excluded])
+        issue = bool(CASE_ISSUE_STEM.search(q) and CASE_ISSUE_TERMS.search(s))
+        score = 2 * len(opts) + (2 if prod else 0) + kw + (1 if tech else 0) + (2 if issue else 0)
+        if opts or prod or kw >= 2:
+            cands.append((score, i, s, opts))
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    picked, covered = [], set()
+    for c in cands:  # 先涵蓋不同選項
+        if len(picked) < MAX_CASE_SENTENCES and c[3] - covered:
+            picked.append(c)
+            covered |= c[3]
+    for c in cands:  # 再依分數補滿
+        if len(picked) < MAX_CASE_SENTENCES and c not in picked:
+            picked.append(c)
+    return [c[2] for c in sorted(picked, key=lambda c: c[1])]
+
+
+def case_sentence_terms(unit, sentence: str, products: list[dict], targets: list[tuple[str, str]]) -> list[str]:
+    """情境句子的檢索詞：技術詞優先，再接一般關鍵詞；排除產品名稱、選項標籤、公司名稱與情境常用字。"""
+    excluded = _case_excluded_words(unit, targets)
+    s = strip_products(sentence, products)
+    tech = [t for t in tech_terms(s) if t.lower() not in excluded]
+    words = [w for w in keywords(s, 12) if w.lower() not in excluded and w not in tech]
+    return list(dict.fromkeys(tech + words))
+
+
 def build_queries(unit) -> tuple[list[str], list[dict], dict[str, str]]:
-    """多組短查詢：主要產品 + 1～2 個關鍵詞。回傳 (查詢, 產品, {對象 ID: 檢索詞})。"""
+    """多組短查詢：主要產品 + 1～2 個關鍵詞。回傳 (查詢, 產品, {對象 ID: 檢索詞})。
+    題組子題若題幹指向情境，先加入最多 MAX_CASE_SENTENCES 組情境查詢，再加入原有查詢（總數仍受 MAX_QUERIES 限制）。
+    產品以 search_products()（檢索專用規則）辨識。"""
     stem, targets = unit_texts(unit)
-    products = detect_products(stem + " " + " ".join(t for _, t in targets))
+    products = search_products(stem, targets)
     primary = products[0]["name"] if products else ""
     qs: list[str] = []
 
@@ -448,6 +546,8 @@ def build_queries(unit) -> tuple[list[str], list[dict], dict[str, str]]:
         if q and q not in qs and len(qs) < MAX_QUERIES and q != primary:
             qs.append(q)
 
+    for s in case_context_sentences(unit, products, targets):
+        add(primary, *case_sentence_terms(unit, s, products, targets))
     stem_tech = tech_terms(strip_products(stem, products))
     for p in products[:2]:  # 題幹技術詞分別搭配前兩個產品（例如 MicrosoftGraphActivityLogs 屬 Microsoft Graph）
         if stem_tech:
@@ -593,6 +693,11 @@ def gather_learn(unit, e: dict | None, search=None, fetch=None, delay: float = 1
     tech = list(dict.fromkeys(tech_terms(strip_products(stem, products))
                               + [t for m in matchers.values() for t in m["tech"]]))
     stem_words = keywords(strip_products(unit.question.get("question", ""), products), 12)
+    # 題組情境（v2）：相關句子的關鍵詞與技術詞只加入段落評分的既有輸入，評分規則不變；路徑篩選仍只用原本的 tech
+    case_sents = case_context_sentences(unit, products, targets)
+    case_terms = list(dict.fromkeys(w for s in case_sents for w in case_sentence_terms(unit, s, products, targets)))
+    stem_words += [w for w in case_terms if w not in stem_words]
+    score_tech = list(dict.fromkeys(tech + [w for w in case_terms if tech_terms(w)]))
     errors: list[str] = []
     considered: dict[str, dict] = {}  # url → 候選紀錄（去重）
 
@@ -670,7 +775,7 @@ def gather_learn(unit, e: dict | None, search=None, fetch=None, delay: float = 1
         fetch_log.append(fetch_record(c, got if isinstance(got, dict) else None, raw=raw, text=text))
         cand = []
         for k, ptext in enumerate(split_passages(text), start=1):
-            s = score_passage(ptext, matchers, tech, products, stem_words)
+            s = score_passage(ptext, matchers, score_tech, products, stem_words)
             pinned = any(p and p in norm(ptext) for p in pins)
             notice = s["related"] and product_change_notice(ptext)
             if pinned or notice or s["eligible"]:
