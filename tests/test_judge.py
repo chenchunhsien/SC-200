@@ -107,7 +107,7 @@ BANK = {"questions": [
     {"id": "m-nodoc", "type": "single_choice", "question": "Which retention option applies to archived data?",
      "options": [{"id": "A", "text": "Option alpha"}, {"id": "B", "text": "Option beta"}], "answer": "A"},
     {"id": "m-tactic", "type": "single_choice",
-     "question": "An attacker uses the Microsoft Graph API. Which tactics can you analyze by using the MicrosoftGraphActivityLogs table?",
+     "question": "An attacker calls the Microsoft Graph API. Which of the listed tactics would be visible in the MicrosoftGraphActivityLogs table?",
      "code": "Name     Tactic\nTactic1  Discovers misconfigured mailboxes\nTactic2  Deletes Azure virtual machines",
      "options": [{"id": "A", "text": "Tactic1 only"}, {"id": "B", "text": "Tactic1 and Tactic2"}], "answer": "A"},
     {"id": "m-mitre", "type": "single_choice",
@@ -2983,7 +2983,7 @@ def aip_unit(qid, stem, options, case=None):
     return gj.eq.Unit(qid, case["id"] if case else qid, "single_choice", q, case)
 
 
-u_aip = aip_unit("q-aip", "You need to implement the Azure Information Protection requirements. What should you configure first?",
+u_aip = aip_unit("q-aip", "To meet the Azure Information Protection goals, what do you set up first?",
                  ["Device health reports in Microsoft 365 Defender portal", "scanner clusters in Azure Information Protection",
                   "content scan jobs in Azure Information Protection", "Advanced features in Microsoft 365 Defender portal"])
 qs_a, pr_a, _ = gj.build_queries(u_aip)
@@ -3010,16 +3010,16 @@ check("Q5 judgment matchers keep 'Information Protection' wording (unchanged eva
 CASE_NW = {"id": "case-nw", "type": "case_study", "caseInfo": {"title": "Testlet 9 · Northwind Traders", "sections": [
     {"title": "Existing Environment", "content": "**Devices**\nThe sales team at Northwind uses only iOS devices for daily work.\n"
                                                  "All users sign in with Microsoft Entra ID accounts every day."},
-    {"title": "Problem Statements", "content": "**Current Problems**\nIn the past, the sales team experienced phishing attacks on their devices.\n"
-                                               "The marketing team has had several incidents in which vendors uploaded files that contain malware "
-                                               "to SharePoint Online sites.\nThe executive team at Northwind suspects a security breach."}]}}
+    {"title": "Problem Statements", "content": "**Current Problems**\nThe sales team keeps receiving phishing messages on their phones.\n"
+                                               "Several times, outside vendors uploaded files containing malware "
+                                               "to the marketing team's SharePoint Online sites.\nThe executive team at Northwind thinks a security breach may have happened."}]}}
 
 
 def case_unit(qid, stem, options, case=CASE_NW):
     return aip_unit(qid, stem, options, case)
 
 
-u_cs = case_unit("c-team", "The issue for which team can be resolved by using Microsoft Defender for Office 365?",
+u_cs = case_unit("c-team", "Which team's problem can be fixed by using Microsoft Defender for Office 365?",
                  ["executive", "marketing", "sales"])
 st_cs, tg_cs = gj.unit_texts(u_cs)
 pr_cs = gj.search_products(st_cs, tg_cs)
