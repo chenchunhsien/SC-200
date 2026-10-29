@@ -1,8 +1,11 @@
 """audit_judge_progress.py 離線測試：假題庫、假證據包、假判讀紀錄；不連網、不呼叫 API。"""
+import atexit
 import copy
 import hashlib
 import io
 import json
+import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -27,6 +30,24 @@ subprocess.run(["git", "init", "-q", str(GIT_ROOT)], check=True)
 (GIT_ROOT / ".gitignore").write_text("tmp/\n", encoding="utf-8")
 (GIT_ROOT / "tmp").mkdir()
 tempfile.tempdir = str(GIT_ROOT / "tmp")
+CLEANUP = [GIT_ROOT]  # 結束時移除（設定環境變數 KEEP_TEST_TMP=1 可保留以便除錯）
+
+
+def _cleanup_tmp():
+    if os.environ.get("KEEP_TEST_TMP") == "1":
+        return
+    def force(fn, path, _exc):  # Git 物件檔在 Windows 上是唯讀
+        os.chmod(path, 0o700)
+        fn(path)
+    kw = {"onexc": force} if sys.version_info >= (3, 12) else {"onerror": force}
+    for p in CLEANUP:
+        try:
+            shutil.rmtree(p, **kw)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_tmp)
 
 
 def check(name, cond, detail=""):
@@ -66,6 +87,8 @@ def v2(pkt):
 
 def make_env(include_verification=True, base=None):
     d = Path(tempfile.mkdtemp(prefix="audit-", dir=base))
+    if base is not None:
+        CLEANUP.append(d)
     bank = d / "bank.json"
     bank.write_text(json.dumps(BANK), encoding="utf-8")
     ws = d / "ws"

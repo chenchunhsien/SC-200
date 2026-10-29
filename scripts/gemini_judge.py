@@ -28,6 +28,19 @@
     python scripts/gemini_judge.py --ids ... --run --tier free|paid           # 送出最近一次 dry-run 的證據包（需互動確認）
     python scripts/gemini_judge.py --output-dir output/WS --report             # 產生 WS/gemini_judgments.md（已存在即拒絕）
     python scripts/gemini_judge.py --output-dir output/WS --ids ... --reevaluate   # 以已保存的模型輸出離線重核（不呼叫 API）
+    python scripts/gemini_judge.py --output-dir output/WS --limit 20               # dry-run：依題庫順序選尚無證據包的題目
+    python scripts/gemini_judge.py --output-dir output/WS --limit 20 --run --tier free   # 依題庫順序選已有證據包、尚無任何紀錄的題目
+
+    python scripts/gemini_judge.py --output-dir output/WS --limit 20 --pipeline --tier free --min-interval 10 --yes
+                                                          # 整合：先補足證據包，再送出尚無任何紀錄的題目
+
+--pipeline 必須搭配 --limit 與 --tier：第一階段依題庫順序產生證據包（已有證據包、尚無紀錄的題目計入 N），任一批失敗即停止、
+不呼叫 Gemini；第二階段送出已有證據包且尚無任何紀錄的題目。--yes 只略過每批的確認提示（--run／--pipeline），
+不略過安全檢查、停止條件或其他驗證。--pipeline 結束時（含停止或錯誤）另存一份新的統計報告
+reports/pipeline_summary_<日期>_<時間>.md（區分本次執行與工作區累積統計；不覆寫既有報告）。
+--limit N（最多 50）取代 --ids 自動選題，分批執行（每批最多 5 題，各批各自取鎖、檢查並確認；批次之間依
+--delay／--min-interval 間隔；任一批未成功即停止後續批次）。--run 自動選題時，結果檔或請求紀錄中已有任何紀錄的題目
+（已完成、社群採用、deferred、回退、未完成請求）一律不再選取，避免重複呼叫；需要重送請以 --ids 明確指定。
 
 所有指令都必須以 --output-dir 明確指定獨立工作區：不得是正式 output/ 或其 gemini_judge/、backups/，
 且必須位於 Git 儲存庫內、已確認受 .gitignore 排除的位置。dry-run 接受「空白工作區」（只有 verification.json
@@ -48,6 +61,7 @@ import copy
 import functools
 import hashlib
 import html
+import io
 import json
 import os
 import re
@@ -60,7 +74,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from contextlib import contextmanager
+from collections import Counter
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -92,6 +107,7 @@ RESULTS_VERSION = 1
 PROMPT_VERSION = "judge-v4"
 EVALUATOR_VERSION = "eval-v5"
 MAX_IDS_PER_RUN = 5          # 防止誤啟動大批次
+MAX_LIMIT = 50               # --limit 自動選題上限（分批執行，每批最多 MAX_IDS_PER_RUN 題）
 MAX_DOCS = 4                 # 每題最多擷取的 Learn 文件數
 MAX_PASSAGES = 8             # 每題送出的段落上限
 PER_DOC_PASSAGES = 3         # 每篇文件最多段落數（人工查證摘錄所在段落另計）
@@ -2107,7 +2123,7 @@ def confirm(prompt: str) -> bool:
 
 
 @locked_command
-def cmd_run(ctx, args, ids: list[str], client_factory=None) -> int:
+def cmd_run(ctx, args, ids: list[str], client_factory=None, streak: dict | None = None) -> int:
     if not args.tier:
         print("--run 必須指定 --tier free 或 --tier paid。")
         return 2
@@ -2180,7 +2196,9 @@ def cmd_run(ctx, args, ids: list[str], client_factory=None) -> int:
         print(f"  預估輸入約 {total_in:,} token；付費層估計 {'—' if cost is None else f'約 US${cost:.4f}'}；{price_note}")
         if args.tier == "free":
             print("  ※ 免費層：不計費，但送出的題目與證據可能被用於改善 Google 產品。")
-        if not confirm("確認送出以上證據包？輸入 yes 繼續："):
+        if getattr(args, "yes", False):  # --yes 只略過本提示；安全檢查、停止條件與紀錄方式不變
+            print("  --yes：本批自動確認送出。")
+        elif not confirm("確認送出以上證據包？輸入 yes 繼續："):
             print("已取消，未呼叫 Gemini API，也未寫入社群採用紀錄。")
             return 2
     backup_dir = ctx.out_dir / "backups"
@@ -2213,7 +2231,7 @@ def cmd_run(ctx, args, ids: list[str], client_factory=None) -> int:
         print("找不到 GEMINI_API_KEY。")
         return 2
     client = (client_factory or (lambda k: eq.make_client(k, args.timeout)))(api_key)
-    transient, stopped = 0, None
+    transient, stopped = (streak or {}).get("deferred", 0), None  # --limit 分批時，連續 deferred 次數跨批累計
     for n, (qid, path, packet, sha) in enumerate(plan, start=1):
         if n > 1 and args.min_interval > 0:
             time.sleep(args.min_interval)
@@ -2258,6 +2276,10 @@ def cmd_run(ctx, args, ids: list[str], client_factory=None) -> int:
             rest = [q for q, *_ in plan[n:]]
             print(f"已停止：{stopped}。" + (f"未送出：{', '.join(rest)}" if rest else ""))
             break
+    if streak is not None:
+        streak["deferred"] = transient
+        if stopped:
+            streak["stopped"] = stopped  # --pipeline 報告記錄停止原因
     print(f"結果：{results_path}（可用 --report 產生 Markdown）")
     return 1 if stopped else 0
 
@@ -2448,11 +2470,13 @@ _STAMP = r"\d{8}-\d{6}-\d{6}"                                   # stamp() 的格
 PACKET_FILE = re.compile(rf"^[^.\\/]+\.{_STAMP}\.json$")         # save_packet()：<題號>.<時間>.json
 ATTEMPT_FILE = re.compile(rf"^[^.\\/]+\.{_STAMP}\.[0-9a-f]{{8}}\.json$")  # record_attempt()：<題號>.<時間>.<8 碼>.json
 BACKUP_FILE = re.compile(rf"^gemini_judgments\.{_STAMP}\.json$")  # va.backup_file()：結果檔備份
+PIPELINE_REPORT_FILE = re.compile(r"^pipeline_summary_\d{8}_\d{6}(?:_\d+)?\.md$")  # write_pipeline_report()
 EMPTY_WORKSPACE_RULE = (
     "可接受的工作區＝空白工作區（只有一般檔案 verification.json 快照，以及可能殘留的工作區鎖檔 "
     f"{LOCK_NAME}），或由本程式累積多批的工作區：另外只能有 gemini_judgments.json（可解析的結果檔）、"
     "gemini_judgments.md、gemini_judge/packets/<題號>.<時間>.json、gemini_judge/attempts/<題號>.<時間>.<8 碼>.json、"
-    "backups/gemini_judgments.<時間>.json；其他任何檔案、目錄、暫存檔、未完成的寫入或連結一律拒絕")
+    "backups/gemini_judgments.<時間>.json、reports/pipeline_summary_<日期>_<時間>.md；"
+    "其他任何檔案、目錄、暫存檔、未完成的寫入或連結一律拒絕")
 
 
 def _plain_file(entry) -> bool:
@@ -2493,6 +2517,9 @@ def workspace_entry_problems(output_dir: Path) -> list[str]:
             continue
         if entry.name == "backups" and _plain_dir(entry):
             scan_files(entry.path, "backups/", BACKUP_FILE)
+            continue
+        if entry.name == "reports" and _plain_dir(entry):
+            scan_files(entry.path, "reports/", PIPELINE_REPORT_FILE)
             continue
         bad.append(entry.name + ("/" if entry.is_dir(follow_symlinks=False) else ""))
     results = d / "gemini_judgments.json"
@@ -2780,6 +2807,381 @@ def dry_run_batch_problems(ctx, ids: list[str]) -> list[str]:
     return problems
 
 
+def auto_select_ids(ctx, mode: str, limit: int) -> tuple[list[str], list[str]]:
+    """--limit 自動選題（唯讀）：依正式題庫順序（ctx.units）取前 limit 題。
+    - dry-run：尚無證據包的題目。
+    - --run：已有證據包，且結果檔與請求紀錄中都沒有任何紀錄的題目。已完成、社群採用、deferred、回退或未完成請求的題目
+      一律不選，避免重複呼叫 Gemini；有無法辨識題號的請求紀錄時保守拒絕。
+    回傳 (題號, 問題)；結果檔無法讀取時拋出例外。"""
+    packet_dir = ctx.out_dir / "gemini_judge" / "packets"
+    has_packet = {p.name.split(".", 1)[0] for p in packet_dir.glob("*.json")} if packet_dir.is_dir() else set()
+    if mode == "dry_run":
+        return [q for q in ctx.units if q not in has_packet][:limit], []
+    existing = load_results(ctx.out_dir / "gemini_judgments.json")
+    pending = unfinished_attempts(ctx.out_dir, existing)
+    unreadable = [u["file"] for u in pending if not u.get("question_id")]
+    if unreadable:
+        return [], [f"有無法辨識題號的請求紀錄（{', '.join(unreadable)}），無法確認哪些題目可能已送出；請以 --ids 明確指定"]
+    seen = {q for q, v in existing["questions"].items() if isinstance(v, dict) and v.get("runs")}
+    seen |= {u["question_id"] for u in pending}
+    return [q for q in ctx.units if q in has_packet and q not in seen][:limit], []
+
+
+def run_batches(ids: list[str], interval: float, fn, state: dict | None = None) -> int:
+    """每批最多 MAX_IDS_PER_RUN 題依序執行 fn(批次題號, 跨批狀態)；批次之間間隔 interval 秒；任一批非 0 即停止。
+    停止時在 state 記錄 failed_batch、rc、unprocessed（供 --pipeline 報告使用）。"""
+    batches = [ids[i:i + MAX_IDS_PER_RUN] for i in range(0, len(ids), MAX_IDS_PER_RUN)]
+    state = {} if state is None else state
+    for b, chunk in enumerate(batches, start=1):
+        if b > 1 and interval > 0:
+            time.sleep(interval)
+        if len(batches) > 1:
+            print(f"#### 第 {b}/{len(batches)} 批：{', '.join(chunk)}")
+        rc = fn(chunk, state)
+        if rc != 0:
+            rest = [q for c in batches[b:] for q in c]
+            state.update(failed_batch=b, batches=len(batches), rc=rc, unprocessed=rest)
+            if rest:
+                print(f"第 {b} 批未成功完成（結束碼 {rc}），停止後續批次。未處理：{', '.join(rest)}")
+            return rc
+    return 0
+
+
+class _Tee(io.TextIOBase):
+    """同時輸出到終端與暫存區（--pipeline 報告記錄某批未成功時的最後訊息）。"""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st in self.streams:
+            st.write(s)
+        return len(s)
+
+    def flush(self):
+        for st in self.streams:
+            st.flush()
+
+
+def _keep_tail(fn, sink: list):
+    """包裝批次函式：照常輸出，並把該批最後 3 行非空白訊息存入 sink。"""
+    def wrapped(chunk, st):
+        buf = io.StringIO()
+        with redirect_stdout(_Tee(sys.stdout, buf)):
+            rc = fn(chunk, st)
+        sink[:] = [x.strip() for x in buf.getvalue().splitlines() if x.strip()][-3:]
+        return rc
+    return wrapped
+
+
+def run_pipeline(ctx, args, client_factory=None, search=None, fetch=None) -> int:
+    """--pipeline：第一階段 dry-run（產生證據包）→ 第二階段 --run（Gemini 判讀），兩階段都依題庫順序、每批最多
+    MAX_IDS_PER_RUN 題，各批沿用 cmd_dry_run／cmd_run 的鎖、安全檢查與紀錄方式。
+    - 已有證據包、尚無任何紀錄的題目計入 --limit，第一階段只補足剩餘題數。
+    - 第一階段任何一批未成功即停止：不進入第二階段、不建立 API client、不呼叫 Gemini。
+    - 第二階段重新選題（auto_select_ids）：已有任何紀錄的題目一律不送出；任一批停止、取消或錯誤即停止後續批次。
+    - 無論完成、停止或發生錯誤，結束時都另存一份新的統計報告 reports/pipeline_summary_<時間>.md（不覆寫既有報告）。"""
+    info = {"started_at": va.now_iso(), "limit": args.limit, "model": args.model, "tier": args.tier,
+            "ready": [], "new": [], "phase2": [], "stop": None, "unprocessed": [], "rc": None,
+            "before": pipeline_state(ctx.out_dir)}
+    try:
+        info["rc"] = _pipeline_phases(ctx, args, client_factory, search, fetch, info)
+    except (OSError, ValueError) as err:
+        info["stop"] = f"執行錯誤，已停止（{type(err).__name__}：{err}）"
+        info["rc"] = "例外"
+        _finish_pipeline_report(ctx, info)
+        raise
+    return _finish_pipeline_report(ctx, info)
+
+
+def _pipeline_phases(ctx, args, client_factory, search, fetch, info: dict) -> int:
+    ready, problems = auto_select_ids(ctx, "run", args.limit)
+    if problems:
+        info["stop"] = "自動選題未通過：" + "；".join(problems)
+        print("--pipeline 自動選題未通過，未發出任何請求：\n  " + "\n  ".join(problems))
+        return 2
+    new, _ = auto_select_ids(ctx, "dry_run", args.limit - len(ready))
+    info.update(ready=ready, new=new)
+    print(f"=== 第一階段：產生證據包 {len(new)} 題" + (f"：{', '.join(new)}" if new else "")
+          + (f"（另有 {len(ready)} 題已有證據包、尚無紀錄：{', '.join(ready)}）" if ready else ""))
+    tail: list = []
+    if new:
+        problems = dry_run_batch_problems(ctx, new)  # 整批預檢（唯讀）；各批在鎖內會再檢查一次
+        if problems:
+            info["stop"] = "第一階段整批預檢未通過（未呼叫 Gemini）：" + "；".join(problems)
+            print("dry-run 整批預檢未通過，未發出任何請求、未建立任何證據包、未呼叫 Gemini API：\n  " + "\n  ".join(problems))
+            return 2
+        st1: dict = {}
+        rc = run_batches(new, args.delay, _keep_tail(lambda chunk, st: cmd_dry_run(ctx, args, chunk, search, fetch, None), tail), st1)
+        if rc != 0:
+            info["stop"] = (f"第一階段第 {st1.get('failed_batch')}/{st1.get('batches')} 批未成功（結束碼 {rc}），"
+                            f"未進入第二階段、未呼叫 Gemini；最後訊息：{' ／ '.join(tail) or '—'}")
+            info["unprocessed"] = st1.get("unprocessed", [])
+            print(f"第一階段未成功完成（結束碼 {rc}），已停止：未進入第二階段、未呼叫 Gemini API。")
+            return rc
+    ids, problems = auto_select_ids(ctx, "run", args.limit)
+    if problems:
+        info["stop"] = "第二階段選題未通過（未呼叫 Gemini）：" + "；".join(problems)
+        print("--pipeline 第二階段選題未通過，未呼叫 Gemini API：\n  " + "\n  ".join(problems))
+        return 2
+    info["phase2"] = ids
+    if not ids:
+        print("=== 第二階段：沒有已產生證據包且尚無任何紀錄的題目，未呼叫 Gemini API。")
+        return 0
+    print(f"=== 第二階段：Gemini 判讀 {len(ids)} 題，分 {-(-len(ids) // MAX_IDS_PER_RUN)} 批：{', '.join(ids)}")
+    st2: dict = {}
+    rc = run_batches(ids, args.min_interval,
+                     _keep_tail(lambda chunk, st: cmd_run(ctx, args, chunk, client_factory, streak=st), tail), st2)
+    if rc != 0:
+        info["stop"] = (f"第二階段第 {st2.get('failed_batch')}/{st2.get('batches')} 批停止（結束碼 {rc}）："
+                        + (st2.get("stopped") or f"最後訊息：{' ／ '.join(tail) or '—'}"))
+        info["unprocessed"] = st2.get("unprocessed", [])
+    return rc
+
+
+# ---- --pipeline 統計報告：只依結果檔、請求紀錄與證據包計算，不推測、不補造 ----------------------------------
+OUTCOMES = {"done": "已完成（Gemini 有效建議）", "community": "採用社群答案（未呼叫 Gemini）",
+            "fallback": "fallback（Gemini 建議無效，保留題庫答案）", "deferred": "deferred（服務暫時不可用或逾時，保留題庫答案）",
+            "error_stop": "錯誤停止（429／400／401／403／404，保留題庫答案）", "unknown": "未知（缺少欄位或無法判斷）"}
+BANK_CMP = {"agree": "一致", "disagree": "不一致", "partial": "部分一致"}
+NOT_ASSESSED = "未評估（沒有有效的 Gemini 判讀）"
+
+
+def report_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def pipeline_state(out_dir: Path) -> dict:
+    """工作區目前狀態（證據包與請求紀錄檔名、各題紀錄筆數）；結果檔無法讀取時記錄錯誤，不拋出。"""
+    def names(sub):
+        d = out_dir / "gemini_judge" / sub
+        return sorted(p.name for p in d.glob("*.json")) if d.is_dir() else []
+    st = {"packets": names("packets"), "attempts": names("attempts"), "results": None, "error": None}
+    try:
+        st["results"] = load_results(out_dir / "gemini_judgments.json")
+    except (OSError, ValueError) as err:
+        st["error"] = f"無法讀取結果檔（{type(err).__name__}）"
+    return st
+
+
+def judged_view(runs) -> dict:
+    """一題的判讀狀態：依有效推薦所依據的紀錄（effective_run_index，同一題只計一次）歸入一個類別。
+    缺少欄位或無法判斷的資料一律為「未知」，不自行歸類。"""
+    v = {"outcome": "unknown", "bank_cmp": "無法比較", "evidence_level": "未知", "final_source": "未知", "conflicts": False}
+    if not isinstance(runs, list) or not runs or not all(isinstance(r, dict) for r in runs):
+        return v
+    r = runs[effective_run_index(runs)]
+    ev = r.get("evaluation") if isinstance(r.get("evaluation"), dict) else None
+    fin = r.get("final_exam_recommendation") if isinstance(r.get("final_exam_recommendation"), dict) else None
+    st = r.get("status")
+    evaluated = ev is not None and ev.get("status") == "evaluated"
+    if is_community_adoption(r):
+        v["outcome"] = "community"
+    elif evaluated and st == "done" and r.get("kind") == "api_call":
+        v["outcome"] = "done"
+    elif st == "deferred":
+        v["outcome"] = "deferred"
+    elif st in ("rate_limited", "fatal"):
+        v["outcome"] = "error_stop"
+    elif isinstance(st, str) and fin is not None and fin.get("source") == "bank_fallback":
+        v["outcome"] = "fallback"
+    if evaluated:
+        v["bank_cmp"] = BANK_CMP.get(ev.get("agrees_with_bank"), "無法比較")
+        level = (ev.get("official_evidence_assessment") or {}).get("confidence") or ev.get("confidence")
+        v["evidence_level"] = level if level in ("高", "中", "低") else "未知"
+        v["conflicts"] = bool(ev.get("official_conflicts"))
+    elif v["outcome"] != "unknown":
+        v["evidence_level"] = NOT_ASSESSED
+    if fin is not None and fin.get("source"):
+        v["final_source"] = fin["source"]
+    return v
+
+
+def review_reasons(v: dict, unfinished: bool) -> list[str]:
+    """待人工複核的條件（報告中列出）：未取得有效判讀、Gemini 建議與題庫答案不一致、官方文件與 Gemini 建議衝突、
+    請求未完成。"""
+    out = []
+    if v["outcome"] in ("fallback", "deferred", "error_stop", "unknown"):
+        out.append(f"未取得有效判讀：{OUTCOMES[v['outcome']]}")
+    if v["bank_cmp"] in ("不一致", "部分一致"):
+        out.append(f"Gemini 建議與題庫答案{v['bank_cmp']}")
+    if v["conflicts"]:
+        out.append("官方文件與 Gemini 建議有衝突")
+    if unfinished:
+        out.append("有未完成的請求（可能已送出、可能已計費，結果未寫入）")
+    return out
+
+
+def summarize_judgments(questions: dict, unfinished: set, order: dict) -> dict:
+    """questions：{題號: 紀錄串列}（每題一個鍵，同一題只計一次）；unfinished：有未完成請求的題號。"""
+    key = lambda q: (order.get(q, len(order)), q)  # noqa: E731 — 依題庫順序列出
+    views = {q: judged_view(runs) for q, runs in questions.items()}
+    review = {q: review_reasons(views.get(q) or judged_view(None), q in unfinished)
+              for q in sorted(set(views) | set(unfinished), key=key)}
+    errors = []
+    for q in sorted(questions, key=key):
+        last = questions[q][-1] if isinstance(questions[q], list) and questions[q] and isinstance(questions[q][-1], dict) else None
+        if last is not None and (last.get("status") in ("deferred", "rate_limited", "fatal")
+                                 or last.get("http_status") not in (None, 200)):
+            errors.append({"id": q, "status": last.get("status"), "http_status": last.get("http_status"),
+                           "error": last.get("error")})
+    return {"count": len(views),
+            "outcomes": Counter(v["outcome"] for v in views.values()),
+            "final_sources": Counter(v["final_source"] for v in views.values()),
+            "bank_cmp": Counter(v["bank_cmp"] for v in views.values()),
+            "evidence_levels": Counter(v["evidence_level"] for v in views.values()),
+            "disagree_ids": [q for q in sorted(views, key=key) if views[q]["bank_cmp"] in ("不一致", "部分一致")],
+            "review": {q: r for q, r in review.items() if r}, "errors": errors,
+            "not_in_bank": sorted(q for q in views if q not in order)}
+
+
+def packet_learn_status(packet_dir: Path, names: list[str]) -> dict:
+    """證據包檔名 → 題號與 Microsoft Learn 檢索狀態（found／not_found…）；無法讀取者為「未知」。"""
+    out = {}
+    for n in sorted(names):
+        qid = n.split(".", 1)[0]
+        try:
+            st = json.loads((packet_dir / n).read_text(encoding="utf-8"))["packet"]["microsoft_learn"]["status"]
+            out[qid] = st if isinstance(st, str) else "未知"
+        except (OSError, ValueError, KeyError, TypeError):
+            out[qid] = "未知"
+    return out
+
+
+def pipeline_stats(ctx, info: dict) -> dict:
+    """本次執行統計（只計本次新增的紀錄、證據包與請求紀錄）與工作區累積統計。"""
+    after, before = pipeline_state(ctx.out_dir), info["before"]
+    order = {q: i for i, q in enumerate(ctx.units)}
+    packet_dir = ctx.out_dir / "gemini_judge" / "packets"
+    new_packets = sorted(set(after["packets"]) - set(before["packets"]))
+    new_attempts = set(after["attempts"]) - set(before["attempts"])
+    s = {"after_error": after["error"], "before_error": before["error"], "new_packets": new_packets,
+         "run": None, "total": None, "run_learn": packet_learn_status(packet_dir, new_packets),
+         "unjudged_packets": [], "unfinished_new": [], "unfinished_all": []}
+    if after["results"] is None:
+        return s
+    qs = after["results"]["questions"]
+    unfinished = unfinished_attempts(ctx.out_dir, after["results"])
+    s["unfinished_all"] = sorted({u["question_id"] or f"（無法辨識：{u['file']}）" for u in unfinished})
+    s["unfinished_new"] = sorted({u["question_id"] or f"（無法辨識：{u['file']}）" for u in unfinished if u["file"] in new_attempts})
+    all_runs = {q: v.get("runs") if isinstance(v, dict) else None for q, v in qs.items()}
+    s["total"] = summarize_judgments({q: r for q, r in all_runs.items() if r}, set(s["unfinished_all"]), order)
+    judged = {q for q, r in all_runs.items() if r}
+    s["unjudged_packets"] = sorted({n.split(".", 1)[0] for n in after["packets"]} - judged,
+                                   key=lambda q: (order.get(q, len(order)), q))
+    if before["results"] is not None:
+        prev = {q: len(v.get("runs") or []) if isinstance(v, dict) else 0 for q, v in before["results"]["questions"].items()}
+        fresh = {q: r[prev.get(q, 0):] for q, r in all_runs.items() if isinstance(r, list) and len(r) > prev.get(q, 0)}
+        s["run"] = summarize_judgments(fresh, set(s["unfinished_new"]), order)
+        s["sent"] = sorted({q for q, rs in fresh.items() for r in rs if isinstance(r, dict) and r.get("api_called") is True}
+                           | set(s["unfinished_new"]), key=lambda q: (order.get(q, len(order)), q))
+    return s
+
+
+def _dist(counter: Counter, labels: dict | None = None) -> str:
+    if not counter:
+        return "—"
+    return "、".join(f"{(labels or {}).get(k, k)} {n}" for k, n in sorted(counter.items(), key=lambda kv: (-kv[1], str(kv[0]))))
+
+
+def _cmp_line(c: Counter) -> str:
+    return (f"一致 {c.get('一致', 0)}｜不一致 {c.get('不一致', 0) + c.get('部分一致', 0)}"
+            f"（其中部分一致 {c.get('部分一致', 0)}）｜無法比較 {c.get('無法比較', 0)}")
+
+
+def _outcome_lines(o: Counter) -> list[str]:
+    return [f"| {OUTCOMES[k]} | {o.get(k, 0)} |" for k in OUTCOMES]
+
+
+def render_pipeline_report(info: dict, s: dict, finished_at: str) -> str:
+    L = ["# Gemini 判讀 pipeline 執行報告", "",
+         f"> 開始 {info['started_at']}｜結束 {finished_at}｜模型 {info['model']}（{info['tier']}）｜--limit {info['limit']}"
+         f"｜結束碼 {info['rc']}",
+         "> 統計只依工作區中的結果檔（gemini_judgments.json）、請求紀錄與證據包計算；缺少欄位或無法判斷的資料列為「未知」。",
+         "> **Gemini 建議答案不是經過獨立驗證的正確答案**；「與題庫一致／不一致」只是兩者的比對結果，不代表何者正確。"
+         "官方證據等級描述證據品質（由程式計算），不是正確率。", ""]
+    run = s["run"]
+    L += ["## 一、本次執行", ""]
+    if info.get("stop"):
+        L += [f"- **停止原因：{info['stop']}**"]
+        if info.get("unprocessed"):
+            L += [f"- 未處理（停止後未執行的批次）：{', '.join(info['unprocessed'])}"]
+    else:
+        L += ["- 停止原因：無（正常結束）"]
+    planned = info["ready"] + info["new"]
+    L += [f"- 預計處理題數：{len(planned)}（新產生證據包 {len(info['new'])} 題＋既有證據包、尚無紀錄 {len(info['ready'])} 題）"
+          + (f"：{', '.join(planned)}" if planned else ""),
+          f"- 實際產生證據包：{len(s['new_packets'])} 份",
+          f"- 第二階段選取：{len(info['phase2'])} 題"]
+    if s["before_error"] or s["after_error"] or run is None:
+        L += [f"- ⚠ 無法計算本次判讀統計：{s['before_error'] or s['after_error'] or '執行前結果檔無法讀取'}", ""]
+    else:
+        L += [f"- 實際送出 Gemini：{len(s['sent'])} 題（依結果檔中 api_called=true 的新紀錄，加上本次未完成的請求）"
+              + (f"：{', '.join(s['sent'])}" if s["sent"] else ""),
+              f"- 本次新增判讀紀錄：{run['count']} 題", "",
+              "| 結果 | 題數 |", "|---|---|", *_outcome_lines(run["outcomes"]),
+              f"| 未完成（已建立請求紀錄、結果未寫入） | {len(s['unfinished_new'])} |", "",
+              f"- Gemini 建議答案與題庫原始答案：{_cmp_line(run['bank_cmp'])}",
+              f"- 官方證據等級（程式計算）：{_dist(run['evidence_levels'])}",
+              f"- Microsoft Learn 檢索結果（本次新產生的證據包）：{_dist(Counter(s['run_learn'].values()))}",
+              f"- 最終推薦來源：{_dist(run['final_sources'])}"]
+        if run["errors"]:
+            L += ["", "**API 錯誤**", "", "| 題號 | 狀態 | HTTP | 錯誤 |", "|---|---|---|---|"]
+            L += [f"| {e['id']} | {e['status']} | {e['http_status'] or '—'} | {str(e['error'] or '—').replace('|', '／')[:200]} |"
+                  for e in run["errors"]]
+        else:
+            L += ["- API 錯誤：無"]
+        L += _review_block(run["review"])
+    tot = s["total"]
+    L += ["## 二、工作區累積統計", ""]
+    if tot is None:
+        L += [f"- ⚠ 無法計算累積統計：{s['after_error']}", ""]
+    else:
+        L += [f"- 累積判讀題數：{tot['count']}（每題只計一次，依有效推薦所依據的紀錄分類）"
+              + (f"；其中 {len(tot['not_in_bank'])} 題不在目前題庫：{', '.join(tot['not_in_bank'])}" if tot["not_in_bank"] else ""),
+              f"- 尚未判讀的證據包：{len(s['unjudged_packets'])} 題" + (f"：{', '.join(s['unjudged_packets'])}" if s["unjudged_packets"] else ""),
+              f"- 未完成的請求：{len(s['unfinished_all'])} 題" + (f"：{', '.join(s['unfinished_all'])}" if s["unfinished_all"] else ""), "",
+              "| 結果 | 題數 |", "|---|---|", *_outcome_lines(tot["outcomes"]), "",
+              f"- Gemini 建議答案與題庫原始答案：{_cmp_line(tot['bank_cmp'])}",
+              f"- 官方證據等級（程式計算）：{_dist(tot['evidence_levels'])}",
+              f"- 最終推薦來源：{_dist(tot['final_sources'])}",
+              f"- Gemini 建議與題庫答案不一致（含部分一致）：{', '.join(tot['disagree_ids']) or '無'}"]
+        L += _review_block(tot["review"])
+    return "\n".join(L)
+
+
+def _review_block(review: dict) -> list[str]:
+    out = ["", f"**待人工複核：{len(review)} 題**（條件：未取得有效判讀、Gemini 建議與題庫答案不一致、"
+               "官方文件與 Gemini 建議衝突、請求未完成）", ""]
+    out += [f"- {q}：{'；'.join(r)}" for q, r in review.items()] or ["- 無"]
+    return out + [""]
+
+
+def write_pipeline_report(ctx, info: dict) -> Path:
+    """在工作區鎖內計算統計並另存新報告；檔名已存在時改用 _2、_3…，不覆寫既有報告。"""
+    with workspace_lock(ctx.out_dir):
+        text = render_pipeline_report(info, pipeline_stats(ctx, info), va.now_iso())
+        base = f"pipeline_summary_{report_stamp()}"
+        for n in range(1, 1000):
+            path = ctx.out_dir / "reports" / (f"{base}.md" if n == 1 else f"{base}_{n}.md")
+            try:
+                write_new_file(path, text + "\n")
+                return path
+            except FileExistsError:
+                continue
+    raise FileExistsError(f"無法建立唯一的報告檔名：{base}")
+
+
+def _finish_pipeline_report(ctx, info: dict):
+    """產生報告；報告失敗不掩蓋原本的結束碼，但正常結束時改回傳 2 讓失敗可見。"""
+    try:
+        path = write_pipeline_report(ctx, info)
+        print(f"pipeline 統計報告：{path}")
+    except (OSError, ValueError, WorkspaceBusy) as err:
+        print(f"⚠ 無法產生 pipeline 統計報告（{type(err).__name__}：{err}）")
+        return 2 if info["rc"] == 0 else info["rc"]
+    return info["rc"]
+
+
 def main(argv=None, client_factory=None, search=None, fetch=None) -> int:
     eq.setup_console()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2788,11 +3190,17 @@ def main(argv=None, client_factory=None, search=None, fetch=None) -> int:
                     help="獨立工作區（所有指令必填；不得是正式 output/，必須受 .gitignore 排除；dry-run 需為只含 "
                          "verification.json 快照的空白工作區）")
     ap.add_argument("--ids", help=f"逗號分隔的子題 ID（一次最多 {MAX_IDS_PER_RUN} 題）")
+    ap.add_argument("--limit", type=int, default=None,
+                    help=f"不指定 --ids，依題庫順序自動選取接下來 N 題（最多 {MAX_LIMIT}，每批 {MAX_IDS_PER_RUN} 題分批執行）")
     ap.add_argument("--run", action="store_true", help="送出最近一次 dry-run 的證據包（需互動確認）")
     ap.add_argument("--report", action="store_true", help="由 gemini_judgments.json 產生 Markdown 報告")
     ap.add_argument("--reevaluate", action="store_true",
                     help="以已保存的模型輸出離線重新核對（不呼叫 API，結果另存一筆紀錄）")
-    ap.add_argument("--tier", choices=["free", "paid"], help="--run 必填")
+    ap.add_argument("--pipeline", action="store_true",
+                    help="搭配 --limit：先產生證據包（dry-run），再送出尚無任何紀錄的題目給 Gemini（需 --tier）")
+    ap.add_argument("--yes", action="store_true",
+                    help="--run／--pipeline 時自動確認每批送出（只略過確認提示，不略過任何安全檢查或停止條件）")
+    ap.add_argument("--tier", choices=["free", "paid"], help="--run／--pipeline 必填")
     ap.add_argument("--force", action="store_true",
                     help="--run 時重新判定已有一致成功紀錄的題目（預設會跳過，不呼叫 API）")
     ap.add_argument("--model", default=eq.DEFAULT_MODEL)
@@ -2813,9 +3221,30 @@ def main(argv=None, client_factory=None, search=None, fetch=None) -> int:
     if args.report and (args.run or args.reevaluate):
         print("--report 不可與 --run 或 --reevaluate 併用。")
         return 2
-    mode = "report" if args.report else "reevaluate" if args.reevaluate else "run" if args.run else "dry_run"
+    if args.pipeline:
+        if args.run or args.report or args.reevaluate or args.ids or args.doc_url:
+            print("--pipeline 不可與 --run、--report、--reevaluate、--ids、--doc-url 併用。")
+            return 2
+        if args.limit is None:
+            print("--pipeline 必須搭配 --limit N。")
+            return 2
+        if not args.tier:
+            print("--pipeline 必須指定 --tier free 或 --tier paid。")
+            return 2
+    if args.yes and not (args.run or args.pipeline):
+        print("--yes 只能搭配 --run 或 --pipeline 使用。")
+        return 2
+    mode = ("pipeline" if args.pipeline else "report" if args.report else "reevaluate" if args.reevaluate
+            else "run" if args.run else "dry_run")
     ids = [x.strip() for x in (args.ids or "").split(",") if x.strip()]
-    if mode != "report":
+    if args.limit is not None:
+        if args.ids or mode not in ("dry_run", "run", "pipeline") or args.doc_url or args.force:
+            print("--limit 只能用於 dry-run、--run 或 --pipeline，且不可與 --ids、--doc-url、--force 併用。")
+            return 2
+        if not 1 <= args.limit <= MAX_LIMIT:
+            print(f"--limit 必須介於 1 到 {MAX_LIMIT}（收到 {args.limit}）。")
+            return 2
+    elif mode != "report":
         if not ids:
             print("請以 --ids 指定題目。")
             return 2
@@ -2833,15 +3262,35 @@ def main(argv=None, client_factory=None, search=None, fetch=None) -> int:
         print("--doc-url 只用於 dry-run；--run 一律送出 dry-run 時已確認的證據包。")
         return 2
     # 2. 唯讀前置檢查：讀取工作區資料、建立目錄或鎖檔、任何外部請求之前（取得工作區鎖後各指令會再檢查一次）
-    problems = mode_preflight(mode, args.output_dir, args.bank)
+    if mode == "pipeline":  # 兩個階段的前置檢查都必須先通過
+        problems = mode_preflight("dry_run", args.output_dir, args.bank) or mode_preflight("run", args.output_dir, args.bank)
+    else:
+        problems = mode_preflight(mode, args.output_dir, args.bank)
     if problems:
-        header = {"run": "--run 安全檢查未通過，未呼叫 API：",
+        header = {"pipeline": "--pipeline 安全檢查未通過，未發出任何請求、未呼叫 API：",
+                  "run": "--run 安全檢查未通過，未呼叫 API：",
                   "dry_run": "dry-run 安全檢查未通過，未發出任何請求、未建立任何目錄或檔案：",
                   "report": "--report 安全檢查未通過，未寫入任何檔案：",
                   "reevaluate": "--reevaluate 安全檢查未通過，未寫入任何檔案："}[mode]
         print(header + "\n  " + "\n  ".join(problems))
         return 2
     ctx = va.Ctx(args.bank.resolve(), args.output_dir.resolve())  # 唯讀
+    if args.limit is not None and mode != "pipeline":
+        try:
+            ids, problems = auto_select_ids(ctx, mode, args.limit)
+        except (OSError, UnicodeDecodeError, ValueError) as err:
+            print(f"無法讀取既有判讀紀錄（{type(err).__name__}），無法判斷哪些題目已處理；未選題、未發出任何請求。")
+            return 2
+        if problems:
+            print("--limit 自動選題未通過，未發出任何請求：\n  " + "\n  ".join(problems))
+            return 2
+        if not ids:
+            print("--limit：沒有符合條件的題目" + ("（尚無證據包的題目已全部產生）。" if mode == "dry_run"
+                                                else "（沒有已產生證據包且尚無任何紀錄的題目；請先以 --limit 執行 dry-run）。"))
+            return 0
+        n_batches = -(-len(ids) // MAX_IDS_PER_RUN)
+        print(f"--limit {args.limit}：依題庫順序選取 {len(ids)} 題，分 {n_batches} 批（每批最多 {MAX_IDS_PER_RUN} 題）："
+              + ", ".join(ids))
     unknown = [i for i in ids if i not in ctx.units]
     if unknown:
         print(f"題庫中找不到：{', '.join(unknown)}")
@@ -2853,13 +3302,15 @@ def main(argv=None, client_factory=None, search=None, fetch=None) -> int:
             return 2
     # 3. 執行：各指令在工作區鎖內重新檢查後才寫入或發出請求
     try:
+        if mode == "pipeline":
+            return run_pipeline(ctx, args, client_factory, search, fetch)
         if mode == "report":
             return cmd_report(ctx)
         if mode == "reevaluate":
             return cmd_reevaluate(ctx, ids)
         if mode == "run":
-            return cmd_run(ctx, args, ids, client_factory)
-        return cmd_dry_run(ctx, args, ids, search, fetch, doc_urls)
+            return run_batches(ids, args.min_interval, lambda chunk, st: cmd_run(ctx, args, chunk, client_factory, streak=st))
+        return run_batches(ids, args.delay, lambda chunk, st: cmd_dry_run(ctx, args, chunk, search, fetch, doc_urls))
     except (OSError, ValueError) as err:  # FileExistsError 為 OSError 子類別；結果檔格式錯誤為 ValueError
         print(f"寫入失敗或資料無法讀取，已停止：{err}")
         return 2

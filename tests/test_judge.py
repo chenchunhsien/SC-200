@@ -31,6 +31,26 @@ subprocess.run(["git", "init", "-q", str(GIT_ROOT)], check=True)
 (GIT_ROOT / ".gitignore").write_text("tmp/\n", encoding="utf-8")
 (GIT_ROOT / "tmp").mkdir()
 tempfile.tempdir = str(GIT_ROOT / "tmp")
+CLEANUP = [GIT_ROOT]  # 結束時移除（設定環境變數 KEEP_TEST_TMP=1 可保留以便除錯）
+
+
+def _cleanup_tmp():
+    if os.environ.get("KEEP_TEST_TMP") == "1":
+        return
+    def force(fn, path, _exc):  # Git 物件檔在 Windows 上是唯讀
+        os.chmod(path, 0o700)
+        fn(path)
+    kw = {"onexc": force} if sys.version_info >= (3, 12) else {"onerror": force}
+    for p in CLEANUP:
+        try:
+            shutil.rmtree(p, **kw)
+        except OSError:
+            pass
+
+
+import atexit  # noqa: E402
+
+atexit.register(_cleanup_tmp)
 PROJECT_INDEX_SHA = hashlib.sha256((PROJECT / ".git" / "index").read_bytes()).hexdigest()
 
 # 網路防護：任何真實連線都會失敗並被記錄（git 子程序不經過本程序的 socket）
@@ -1231,8 +1251,11 @@ _, sha_any, ok_any = gj.load_packet(pf_any)
 gj.model_view(gj.load_packet(pf_any)[0])
 check("packet hash verification unaffected", ok_any and gj.load_packet(pf_any)[1] == sha_any and gj.load_packet(pf_any)[2])
 real_dir = PROJECT / "output" / "gemini_trial1-20261027" / "gemini_judge" / "packets"
-real_ok = [gj.load_packet(x)[2] for x in sorted(real_dir.glob("*.json"))]
-check("existing real packets still verify (read-only)", real_ok and all(real_ok), len(real_ok))
+if real_dir.is_dir():
+    real_ok = [gj.load_packet(x)[2] for x in sorted(real_dir.glob("*.json"))]
+    check("existing real packets still verify (read-only)", real_ok and all(real_ok), len(real_ok))
+else:
+    print(f"NOTE real-packet check skipped: {real_dir} not present")
 check("bank unchanged (final)", json.loads(env.bank.read_text(encoding="utf-8")) == BANK)
 
 # ---------------------------------------------------------------------------
@@ -1753,8 +1776,14 @@ off_pkt.write_text('{"keep": true}', encoding="utf-8")
 
 
 def dir_state(root):
-    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "<dir>"
-            for p in sorted(root.rglob("*"))}
+    def digest(p):
+        if not p.is_file():
+            return "<dir>"
+        try:
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+        except PermissionError:  # 另一個程序正持有的工作區鎖檔（例如正在執行的 pipeline）
+            return "<locked>"
+    return {str(p.relative_to(root)): digest(p) for p in sorted(root.rglob("*"))}
 
 
 real_default_out = va.DEFAULT_OUT
@@ -2040,6 +2069,7 @@ check("F02 git checks did not modify the test repo's .git (index unchanged)", tr
 probe = subprocess.run(["git", "-C", str(REAL_TEMP), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
 if probe.returncode != 0:
     ws_out = Path(tempfile.mkdtemp(dir=REAL_TEMP, prefix="judge-norepo-"))
+    CLEANUP.append(ws_out)
     valid_snapshot(ws_out, dr_bank)
     rc, log, calls = dry(dr_bank, ws_out)
     check("F02 workspace outside any git repo → refused (cannot confirm)", rc == 2 and "不在 Git 儲存庫內" in log and not calls, log)
@@ -3062,6 +3092,455 @@ check("Q11 same question without case context → passage not selected (shows th
       not ml_cs_plain["documents"], ml_cs_plain["documents"])
 check("Q12 path filter terms unchanged: case tech terms do not widen allowed_path",
       gj.allowed_path("https://learn.microsoft.com/en-us/sharepoint/some-page", pr_cs, [])[0] is False)
+
+# ===========================================================================
+# 15. --limit：依題庫順序自動選題、每批最多 5 題分批執行、不重複選取已有紀錄的題目
+# ===========================================================================
+BANK_ORDER = [q["id"] for q in BANK["questions"]]  # 測試題庫每題一個子題，ctx.units 順序即題庫順序
+
+
+def lim_ws(name):
+    ws_ = DRB / name
+    valid_snapshot(ws_, dr_bank, {"m-single": ent_m})  # m-single 達社群門檻（20 票／90%）
+    return ws_
+
+
+def lim_dry(ws_, *extra):
+    DR_CALLS.clear()
+    rc_, log_ = mainq(["--bank", str(dr_bank), "--output-dir", str(ws_), "--delay", "0", *extra],
+                      search=counting_search, fetch=counting_fetch)
+    return rc_, log_, list(DR_CALLS)
+
+
+def lim_run(ws_, client, *extra, answer=True):
+    made_, asked_ = [], []
+    gj.confirm = lambda prompt: (asked_.append(prompt), answer)[1]
+    rc_, log_ = mainq(["--bank", str(dr_bank), "--output-dir", str(ws_), "--run", "--tier", "paid", *extra],
+                      client_factory=lambda k: (made_.append(k), client)[1])
+    return rc_, log_, made_, asked_
+
+
+def sent_ids(client):
+    return [re.search(r'"question_id": "([^"]+)"', c[1]).group(1) for c in client.calls]
+
+
+va.DEFAULT_OUT = MA_BASE
+real_sleep = gj.time.sleep
+try:
+    check("L0 MAX_LIMIT is 50 and batches stay at MAX_IDS_PER_RUN=5", gj.MAX_LIMIT == 50 and gj.MAX_IDS_PER_RUN == 5)
+    # ---- 參數檢查：任何讀取或請求之前拒絕 ----
+    wl0 = lim_ws("lim_args")
+    before_l0 = tree(wl0)
+    for label, extra in (("with --ids", ("--limit", "2", "--ids", "m-single")), ("0", ("--limit", "0")),
+                         ("51", ("--limit", "51")), ("with --report", ("--limit", "2", "--report")),
+                         ("with --reevaluate", ("--limit", "2", "--reevaluate")),
+                         ("with --doc-url", ("--limit", "2", "--doc-url", TABLES)),
+                         ("with --run --force", ("--limit", "2", "--run", "--tier", "paid", "--force"))):
+        rc, log, calls = lim_dry(wl0, *extra)
+        check(f"L1 --limit {label} → refused, no request, nothing written", rc == 2 and not calls and tree(wl0) == before_l0, log)
+    rc, log, calls = lim_dry(wl0, "--ids", "m-single")
+    check("L1 --ids without --limit still works (single batch, no batch header)", rc == 0 and "第 1/" not in log
+          and packet_files(wl0) and all(n.startswith("m-single.") for n in packet_files(wl0)), log[-300:])
+
+    # ---- dry-run：依題庫順序選尚無證據包的題目，分批 ----
+    wl = lim_ws("lim_ws")
+    rc, log, calls = lim_dry(wl, "--limit", "2")
+    check("L2 dry-run --limit 2 → first 2 bank questions, one batch",
+          rc == 0 and sorted(n.split(".")[0] for n in packet_files(wl)) == sorted(BANK_ORDER[:2]) and "第 1/" not in log, log[-300:])
+    first_pk = pk_hashes(wl)
+    rc, log, calls = lim_dry(wl, "--limit", "20")
+    check("L3 dry-run --limit 20 → skips questions that already have packets, picks the rest in bank order",
+          rc == 0 and f"選取 4 題" in log and ", ".join(BANK_ORDER[2:]) in log, log[:400])
+    check("L3 existing packets unchanged", all(pk_hashes(wl).get(k) == v for k, v in first_pk.items()) and len(pk_hashes(wl)) == 6)
+    rc, log, calls = lim_dry(wl, "--limit", "20")
+    check("L4 dry-run --limit with nothing left → rc 0, no request, nothing written",
+          rc == 0 and not calls and "沒有符合條件的題目" in log and len(pk_hashes(wl)) == 6, log)
+    wl6 = lim_ws("lim_ws6")
+    rc, log, calls = lim_dry(wl6, "--limit", "6")
+    check("L5 dry-run --limit 6 → 2 batches (5 + 1), 6 packets",
+          rc == 0 and "第 1/2 批：" + ", ".join(BANK_ORDER[:5]) in log and "第 2/2 批：" + BANK_ORDER[5] in log
+          and len(pk_hashes(wl6)) == 6, log[:600])
+
+    # ---- --run：已有證據包、尚無紀錄的題目；社群優先；每批確認；批次間隔 ----
+    sleeps = []
+    gj.time.sleep = lambda s: sleeps.append(s)
+    cl = FakeClient(["{}"] * 5)
+    rc, log, made, asked = lim_run(wl, cl, "--limit", "20", "--min-interval", "7")
+    res = json.loads((wl / "gemini_judgments.json").read_text(encoding="utf-8"))
+    check("L6 --run --limit → 2 batches in bank order", rc == 0 and "第 1/2 批：" + ", ".join(BANK_ORDER[:5]) in log
+          and "第 2/2 批：" + BANK_ORDER[5] in log, log[-800:])
+    check("L6 community-qualified m-single adopted without API; other 5 sent once each, in bank order",
+          sent_ids(cl) == BANK_ORDER[1:] and res["questions"]["m-single"]["runs"][0]["kind"] == gj.COMMUNITY_KIND, sent_ids(cl))
+    check("L6 one confirmation per batch that sends requests", len(asked) == 2, asked)
+    check("L6 invalid Gemini output → bank answer kept (fallback rule unchanged)",
+          all(res["questions"][q]["runs"][-1]["final_exam_recommendation"]["source"] == "bank_fallback" for q in BANK_ORDER[1:]))
+    check("L6 --min-interval applied within and between batches (3 in batch 1 + 1 between batches)", sleeps == [7.0] * 4, sleeps)
+    gj.time.sleep = real_sleep
+    before_l7 = tree(wl)
+    cl7 = FakeClient([])
+    rc, log, made, asked = lim_run(wl, cl7, "--limit", "20")
+    check("L7 --run --limit again → every question already has a record → nothing selected, no client/API/confirm",
+          rc == 0 and not made and not asked and not cl7.calls and "沒有符合條件的題目" in log and tree(wl) == before_l7, log)
+
+    # ---- 停止規則跨批次 ----
+    wd = lim_ws("lim_deferred")
+    lim_dry(wd, "--limit", "6")
+    cld = FakeClient(["{}", "{}", "{}", FakeAPIError(503, "UNAVAILABLE"), FakeAPIError(503, "UNAVAILABLE")])
+    rc, log, made, asked = lim_run(wd, cld, "--limit", "6")
+    check("L8 consecutive deferred counted across batches (last of batch 1 + first of batch 2) → stop, rc 1",
+          rc == 1 and "連續 2 次" in log and len(cld.calls) == 5, log[-500:])
+    wr = lim_ws("lim_429")
+    lim_dry(wr, "--limit", "6")
+    clr = FakeClient([FakeAPIError(429, "RESOURCE_EXHAUSTED")])
+    rc, log, made, asked = lim_run(wr, clr, "--limit", "6")
+    check("L9 429 in batch 1 → stop immediately, later batches not run",
+          rc == 1 and len(clr.calls) == 1 and "停止後續批次" in log and BANK_ORDER[5] in log.split("停止後續批次")[-1], log[-500:])
+    clr2 = FakeClient(["{}"] * 4)
+    rc, log, made, asked = lim_run(wr, clr2, "--limit", "6")
+    check("L9 rerun: rate-limited question has a record → not auto-selected again (no repeat call)",
+          rc == 0 and sent_ids(clr2) == BANK_ORDER[2:], sent_ids(clr2))
+    wc = lim_ws("lim_cancel")
+    lim_dry(wc, "--limit", "6")
+    clc = FakeClient([])
+    rc, log, made, asked = lim_run(wc, clc, "--limit", "6", answer=False)
+    check("L10 cancel at batch-1 confirmation → rc 2, batch 2 not run, no API",
+          rc == 2 and len(asked) == 1 and not clc.calls and not made and "停止後續批次" in log, log[-400:])
+
+    # ---- 無法確認狀態時保守拒絕 ----
+    wu = lim_ws("lim_unreadable")
+    lim_dry(wu, "--limit", "2")
+    (wu / "gemini_judge" / "attempts").mkdir(parents=True, exist_ok=True)
+    (wu / "gemini_judge" / "attempts" / "broken.json").write_text("not json", encoding="utf-8")
+    clu = FakeClient([])
+    rc, log, made, asked = lim_run(wu, clu, "--limit", "2")
+    check("L11 unreadable attempt record → auto-selection refused, no client/API",
+          rc == 2 and not made and not clu.calls and "無法辨識題號的請求紀錄" in log, log)
+    wa = lim_ws("lim_attempt")
+    lim_dry(wa, "--limit", "2")
+    (wa / "gemini_judge" / "attempts").mkdir(parents=True, exist_ok=True)
+    (wa / "gemini_judge" / "attempts" / "x.json").write_text(json.dumps(
+        {"attempt_id": "a-1", "question_id": "m-multi", "started_at": "2026-10-28T00:00:00+00:00"}), encoding="utf-8")
+    cla = FakeClient([])
+    rc, log, made, asked = lim_run(wa, cla, "--limit", "2")
+    check("L12 unfinished attempt for m-multi → m-multi not auto-selected (may already be billed); only m-single (community)",
+          rc == 0 and not cla.calls and "選取 1 題" in log and "m-single" in log, log)
+    wj = lim_ws("lim_corrupt")
+    lim_dry(wj, "--limit", "2")
+    (wj / "gemini_judgments.json").write_text("{broken", encoding="utf-8")
+    clj = FakeClient([])
+    rc, log, made, asked = lim_run(wj, clj, "--limit", "2")
+    check("L13 unreadable results file → refused, no client/API", rc == 2 and not made and not clj.calls
+          and "無法讀取既有判讀紀錄" in log, log)
+finally:
+    gj.time.sleep = real_sleep
+    va.DEFAULT_OUT = P1_BASE
+
+# ===========================================================================
+# 16. --pipeline（先產生證據包再判讀）與 --yes（只略過每批確認提示）
+# ===========================================================================
+
+
+def no_confirm(prompt):
+    raise AssertionError("--yes must not prompt")
+
+
+def pipe(ws_, client, *extra, confirm_fn=no_confirm):
+    made_, asked_ = [], []
+    gj.confirm = lambda prompt: (asked_.append(prompt), confirm_fn(prompt))[1]
+    DR_CALLS.clear()
+    rc_, log_ = mainq(["--bank", str(dr_bank), "--output-dir", str(ws_), "--delay", "0", "--pipeline", "--tier", "paid", *extra],
+                      client_factory=lambda k: (made_.append(k), client)[1], search=counting_search, fetch=counting_fetch)
+    return rc_, log_, made_, asked_, list(DR_CALLS)
+
+
+def runs_of(ws_):
+    p = ws_ / "gemini_judgments.json"
+    return json.loads(p.read_text(encoding="utf-8"))["questions"] if p.exists() else {}
+
+
+va.DEFAULT_OUT = MA_BASE
+real_save_packet = gj.save_packet
+try:
+    # ---- 參數檢查：任何讀取或請求之前拒絕 ----
+    wp0 = lim_ws("pipe_args")
+    before_p0 = tree(wp0)
+    for label, extra in (("without --limit", ("--pipeline", "--tier", "paid")),
+                         ("without --tier", ("--pipeline", "--limit", "2")),
+                         ("with --run", ("--pipeline", "--limit", "2", "--tier", "paid", "--run")),
+                         ("with --ids", ("--pipeline", "--limit", "2", "--tier", "paid", "--ids", "m-single")),
+                         ("with --report", ("--pipeline", "--limit", "2", "--tier", "paid", "--report")),
+                         ("with --reevaluate", ("--pipeline", "--limit", "2", "--tier", "paid", "--reevaluate")),
+                         ("with --doc-url", ("--pipeline", "--limit", "2", "--tier", "paid", "--doc-url", TABLES)),
+                         ("with --force", ("--pipeline", "--limit", "2", "--tier", "paid", "--force")),
+                         ("--limit 51", ("--pipeline", "--limit", "51", "--tier", "paid")),
+                         ("--yes on dry-run", ("--limit", "2", "--yes")),
+                         ("--yes with --report", ("--report", "--yes")),
+                         ("--yes with --reevaluate", ("--ids", "m-single", "--reevaluate", "--yes"))):
+        rc, log, calls = lim_dry(wp0, *extra)
+        check(f"P1 {label} → refused, no request, nothing written", rc == 2 and not calls and tree(wp0) == before_p0, log)
+
+    # ---- 整合流程：一條指令產生證據包並判讀，--yes 不提示 ----
+    wp = lim_ws("pipe_ws")
+    clp = FakeClient([multi_result('["A","C"]'), "{}", "{}", "{}", "{}"])
+    rc, log, made, asked, calls = pipe(wp, clp, "--limit", "6", "--yes")
+    rp = runs_of(wp)
+    check("P2 pipeline --limit 6 --yes → rc 0, 6 packets, all 6 questions recorded", rc == 0 and len(pk_hashes(wp)) == 6
+          and sorted(rp) == sorted(BANK_ORDER), log[-800:])
+    check("P2 phase 1 then phase 2, both in bank order and batches of 5",
+          log.index("第一階段") < log.index("第二階段") and log.count("第 1/2 批：" + ", ".join(BANK_ORDER[:5])) == 2, log[:1200])
+    check("P2 --yes: no confirmation prompt, one auto-confirm per sending batch", not asked and log.count("--yes：本批自動確認送出") == 2, asked)
+    check("P2 community first: m-single adopted without API; other 5 sent once each in bank order",
+          sent_ids(clp) == BANK_ORDER[1:] and rp["m-single"]["runs"][0]["kind"] == gj.COMMUNITY_KIND, sent_ids(clp))
+    check("P2 valid Gemini answer → done/gemini; invalid output → bank answer kept",
+          rp["m-multi"]["runs"][0]["status"] == "done" and rp["m-multi"]["runs"][0]["final_exam_recommendation"]["source"] == "gemini"
+          and all(rp[q]["runs"][0]["final_exam_recommendation"]["source"] == "bank_fallback" for q in BANK_ORDER[2:]),
+          {q: (v["runs"][0]["status"], v["runs"][0]["final_exam_recommendation"]["source"]) for q, v in rp.items()})
+    def no_reports(t):
+        return {k: v for k, v in t.items() if not k.startswith("reports")}
+    before_p3 = tree(wp)
+    clp3 = FakeClient([])
+    rc, log, made, asked, calls = pipe(wp, clp3, "--limit", "6", "--yes")
+    check("P3 rerun: done / community / fallback questions not re-sent; no search, no client; workspace unchanged except a new report",
+          rc == 0 and not calls and not made and not clp3.calls and no_reports(tree(wp)) == no_reports(before_p3), log)
+
+    # ---- 已有證據包、尚無紀錄的題目計入 N ----
+    wl3 = lim_ws("pipe_leftover")
+    lim_dry(wl3, "--limit", "2")
+    left_pk = pk_hashes(wl3)
+    cl3 = FakeClient(["{}", "{}"])
+    rc, log, made, asked, calls = pipe(wl3, cl3, "--limit", "3", "--yes")
+    check("P4 leftover packets count toward --limit: only 1 new packet, 3 questions processed",
+          rc == 0 and len(pk_hashes(wl3)) == 3 and sorted(runs_of(wl3)) == sorted(BANK_ORDER[:3])
+          and sent_ids(cl3) == BANK_ORDER[1:3], (sent_ids(cl3), log[-500:]))
+    check("P4 leftover packets unchanged", all(pk_hashes(wl3).get(k) == v for k, v in left_pk.items()))
+
+    # ---- 第一階段失敗：不呼叫 Gemini ----
+    wf = lim_ws("pipe_phase1_fail")
+    def failing_save(packet_dir, packet):
+        if packet["question_id"] == BANK_ORDER[5]:
+            raise OSError("disk full (simulated)")
+        return real_save_packet(packet_dir, packet)
+    gj.save_packet = failing_save
+    clf = FakeClient([])
+    rc, log, made, asked, calls = pipe(wf, clf, "--limit", "6", "--yes")
+    gj.save_packet = real_save_packet
+    check("P5 phase-1 failure in batch 2 → stop, no client, no Gemini call, no result file",
+          rc == 2 and not made and not clf.calls and not (wf / "gemini_judgments.json").exists() and "第二階段" not in log, log[-500:])
+    wf2 = DRB / "pipe_precheck_fail"
+    bad = copy.deepcopy(ent_m)
+    bad["bank_answer"]["value"] = "C"  # 快照記錄的題庫答案與目前題庫不一致 → 整批預檢失敗
+    valid_snapshot(wf2, dr_bank, {"m-single": bad})
+    clf2 = FakeClient([])
+    rc, log, made, asked, calls = pipe(wf2, clf2, "--limit", "2", "--yes")
+    check("P5 phase-1 batch precheck failure → no request, no packet, no Gemini call",
+          rc == 2 and not calls and not made and not clf2.calls and not packet_files(wf2), log[-400:])
+    wns = DRB / "pipe_no_snapshot"
+    wns.mkdir()
+    clns = FakeClient([])
+    rc, log, made, asked, calls = pipe(wns, clns, "--limit", "2", "--yes")
+    check("P5 --yes does not bypass preflight (workspace without snapshot) → refused, nothing created",
+          rc == 2 and not calls and not made and "--pipeline 安全檢查未通過" in log and not any(wns.iterdir()), log)
+
+    # ---- 停止條件阻止後續批次；已有紀錄不重送 ----
+    wd = lim_ws("pipe_deferred")
+    cld = FakeClient(["{}", "{}", "{}", FakeAPIError(503, "UNAVAILABLE"), FakeAPIError(503, "UNAVAILABLE")])
+    rc, log, made, asked, calls = pipe(wd, cld, "--limit", "6", "--yes")
+    check("P6 503 at end of batch 1 + 503 at start of batch 2 → consecutive-2 stop, rc 1",
+          rc == 1 and "連續 2 次" in log and len(cld.calls) == 5, log[-500:])
+    deferred_runs = {q: len(v["runs"]) for q, v in runs_of(wd).items()}
+    cld2 = FakeClient([])
+    rc, log, made, asked, calls = pipe(wd, cld2, "--limit", "6", "--yes")
+    check("P6 rerun: deferred questions have records → not re-sent, existing records not overwritten",
+          rc == 0 and not cld2.calls and not made and {q: len(v["runs"]) for q, v in runs_of(wd).items()} == deferred_runs, log[-400:])
+    for code, msg in ((429, "RESOURCE_EXHAUSTED"), (400, "INVALID_ARGUMENT"), (401, "UNAUTHENTICATED"),
+                      (403, "PERMISSION_DENIED"), (404, "NOT_FOUND")):
+        wx = lim_ws(f"pipe_{code}")
+        clx = FakeClient([FakeAPIError(code, msg)])
+        rc, log, made, asked, calls = pipe(wx, clx, "--limit", "6", "--yes")
+        check(f"P7 HTTP {code} on first request → stop immediately, later batches not run",
+              rc == 1 and len(clx.calls) == 1 and "停止後續批次" in log and set(runs_of(wx)) == {"m-single", "m-multi"}, log[-400:])
+    clx2 = FakeClient(["{}"] * 4)
+    rc, log, made, asked, calls = pipe(wx, clx2, "--limit", "6", "--yes")
+    check("P7 rerun after stop: stopped question (has record) not re-sent; remaining 4 sent once",
+          rc == 0 and sent_ids(clx2) == BANK_ORDER[2:] and not calls, (sent_ids(clx2), log[-400:]))
+
+    # ---- 不用 --yes：每批仍需確認；取消即停止 ----
+    wc = lim_ws("pipe_cancel")
+    clc = FakeClient([])
+    rc, log, made, asked, calls = pipe(wc, clc, "--limit", "6", confirm_fn=lambda p: False)
+    check("P8 pipeline without --yes, cancel at batch 1 → rc 2, no API, batch 2 not run",
+          rc == 2 and len(asked) == 1 and not made and not clc.calls and "停止後續批次" in log and len(pk_hashes(wc)) == 6, log[-400:])
+
+    # ---- --yes 搭配 --run ----
+    wy = lim_ws("yes_run")
+    lim_dry(wy, "--limit", "2")
+    cly = FakeClient(["{}"])
+    gj.confirm = no_confirm
+    rc, log, made, asked = lim_run(wy, cly, "--limit", "2", "--yes")
+    check("P9 --run --limit --yes → no prompt, community + 1 sent", rc == 0 and sent_ids(cly) == ["m-multi"], log[-400:])
+    wt = lim_ws("yes_tampered")
+    lim_dry(wt, "--ids", "m-multi")
+    pkt = next((wt / "gemini_judge" / "packets").glob("m-multi.*.json"))
+    pkt.write_text(pkt.read_text(encoding="utf-8").replace("Syslog", "SyslogX"), encoding="utf-8")
+    clt = FakeClient([])
+    made_t = []
+    gj.confirm = no_confirm
+    rc, log = mainq(["--bank", str(dr_bank), "--output-dir", str(wt), "--ids", "m-multi", "--run", "--tier", "paid", "--yes"],
+                    client_factory=lambda k: (made_t.append(k), clt)[1])
+    check("P10 --yes does not bypass packet hash check → refused, no client, no API",
+          rc == 2 and "雜湊不符" in log and not made_t and not clt.calls, log)
+finally:
+    gj.save_packet = real_save_packet
+    va.DEFAULT_OUT = P1_BASE
+
+# ===========================================================================
+# 17. --limit 上限 50；--pipeline 結束後自動產生統計報告（本次／累積、去重、未知、停止後報告、不覆寫）
+# ===========================================================================
+
+
+def reports_in(ws_):
+    d = ws_ / "reports"
+    return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
+
+
+def report_parts(ws_, name):
+    t = (ws_ / "reports" / name).read_text(encoding="utf-8")
+    return t, t.split("## 二、")[0], t.split("## 二、")[-1]
+
+
+va.DEFAULT_OUT = MA_BASE
+real_stamp = gj.report_stamp
+try:
+    # ---- 題數上限 ----
+    w50 = lim_ws("rep_limit50")
+    rc, log, calls = lim_dry(w50, "--limit", "50")
+    check("R1 --limit 50 accepted (bank has 6 → selects 6)", rc == 0 and "選取 6 題" in log and len(pk_hashes(w50)) == 6, log[:300])
+    rc, log, calls = lim_dry(w50, "--limit", "51")
+    check("R1 --limit 51 refused before any request", rc == 2 and not calls and "1 到 50" in log, log)
+
+    # ---- 正常結束的報告 ----
+    wr = lim_ws("rep_ws")
+    clr = FakeClient([multi_result('["A","C"]'), "{}", "{}", "{}", "{}"])
+    rc, log, made, asked, calls = pipe(wr, clr, "--limit", "50", "--yes")
+    reps = reports_in(wr)
+    check("R2 pipeline → exactly one report with the unique name pattern",
+          rc == 0 and len(reps) == 1 and gj.PIPELINE_REPORT_FILE.match(reps[0]) and "pipeline 統計報告" in log, (reps, log[-300:]))
+    txt, s1, s2 = report_parts(wr, reps[0])
+    check("R2 this run: planned 6, 6 packets, 5 sent to Gemini, no stop",
+          "預計處理題數：6" in s1 and "實際產生證據包：6 份" in s1 and "實際送出 Gemini：5 題" in s1
+          and "停止原因：無（正常結束）" in s1, s1)
+    check("R2 this run outcomes: 1 done / 1 community / 4 fallback / 0 deferred / 0 error / 0 unknown / 0 unfinished",
+          "| 已完成（Gemini 有效建議） | 1 |" in s1 and "| 採用社群答案（未呼叫 Gemini） | 1 |" in s1
+          and "| fallback（Gemini 建議無效，保留題庫答案） | 4 |" in s1 and "deferred（服務暫時不可用或逾時，保留題庫答案） | 0 |" in s1
+          and "| 錯誤停止（429／400／401／403／404，保留題庫答案） | 0 |" in s1 and "| 未知（缺少欄位或無法判斷） | 0 |" in s1
+          and "| 未完成（已建立請求紀錄、結果未寫入） | 0 |" in s1, s1)
+    check("R2 Gemini vs bank: 1 agree, 0 disagree, 5 not comparable (community + invalid outputs are not compared)",
+          "一致 1｜不一致 0（其中部分一致 0）｜無法比較 5" in s1, s1)
+    check("R2 evidence levels: 5 not assessed (no valid Gemini judgment), 1 graded", f"{gj.NOT_ASSESSED} 5" in s1
+          and re.search(r"官方證據等級（程式計算）：[^\n]*(高|中|低) 1", s1), s1)
+    check("R2 Learn retrieval status reported from this run's packets", "Microsoft Learn 檢索結果（本次新產生的證據包）：" in s1
+          and "未知" not in s1.split("Microsoft Learn 檢索結果")[1].split("\n")[0], s1)
+    check("R2 review list: the 4 fallback questions, with reasons", all(f"- {q}：未取得有效判讀：fallback" in s1 for q in BANK_ORDER[2:])
+          and "- m-multi：" not in s1 and "- m-single：" not in s1 and "API 錯誤：無" in s1, s1)
+    check("R2 cumulative: 6 judged, 0 unjudged packets, disclaimer that Gemini is not independently verified",
+          "累積判讀題數：6" in s2 and "尚未判讀的證據包：0 題" in s2 and "不是經過獨立驗證的正確答案" in txt, s2)
+
+    # ---- 重跑：新報告、不覆寫；本次為 0、累積不重複計算 ----
+    first_sha = sha(wr / "reports" / reps[0])
+    rc, log, made, asked, calls = pipe(wr, FakeClient([]), "--limit", "50", "--yes")
+    reps2 = reports_in(wr)
+    new_rep = [n for n in reps2 if n not in reps]
+    check("R3 rerun → a second, separate report; first report unchanged", rc == 0 and len(reps2) == 2 and len(new_rep) == 1
+          and sha(wr / "reports" / reps[0]) == first_sha, reps2)
+    _, s1b, s2b = report_parts(wr, new_rep[0])
+    check("R3 rerun this-run stats are zero; cumulative still counts each question once",
+          "實際產生證據包：0 份" in s1b and "實際送出 Gemini：0 題" in s1b and "本次新增判讀紀錄：0 題" in s1b
+          and "累積判讀題數：6" in s2b and "| fallback（Gemini 建議無效，保留題庫答案） | 4 |" in s2b, s1b + s2b)
+    gj.report_stamp = lambda: "20990101_000000"
+    taken = wr / "reports" / "pipeline_summary_20990101_000000.md"
+    taken.write_text("keep me", encoding="utf-8")
+    rc, log, made, asked, calls = pipe(wr, FakeClient([]), "--limit", "50", "--yes")
+    check("R4 report name already exists → new name with _2, existing file not overwritten",
+          (wr / "reports" / "pipeline_summary_20990101_000000_2.md").is_file()
+          and taken.read_text(encoding="utf-8") == "keep me", reports_in(wr))
+    gj.report_stamp = real_stamp
+    rc, log, calls = lim_dry(wr, "--limit", "1")
+    check("R5 workspace with reports/ still accepted by dry-run preflight (whitelist)", rc == 0 and "沒有符合條件的題目" in log, log)
+    (wr / "reports" / "notes.txt").write_text("x", encoding="utf-8")
+    rc, log, calls = lim_dry(wr, "--limit", "1")
+    check("R5 unknown file in reports/ → dry-run refused (whitelist is strict)", rc == 2 and "reports/notes.txt" in log and not calls, log)
+
+    # ---- 停止後仍產生報告並記錄原因 ----
+    ws429 = lim_ws("rep_429")
+    rc, log, made, asked, calls = pipe(ws429, FakeClient([FakeAPIError(429, "RESOURCE_EXHAUSTED")]), "--limit", "6", "--yes")
+    r429 = reports_in(ws429)
+    _, s1c, s2c = report_parts(ws429, r429[0])
+    check("R6 429 stop → report written with stop reason, unprocessed batch and API error",
+          rc == 1 and len(r429) == 1 and "停止原因：第二階段第 1/2 批停止（結束碼 1）：429" in s1c
+          and f"未處理（停止後未執行的批次）：{BANK_ORDER[5]}" in s1c and "| m-multi | rate_limited |" in s1c, s1c)
+    check("R6 429 counts: 1 sent, 1 error stop, 1 community; m-multi needs review",
+          "實際送出 Gemini：1 題" in s1c and "| 錯誤停止（429／400／401／403／404，保留題庫答案） | 1 |" in s1c
+          and "| 採用社群答案（未呼叫 Gemini） | 1 |" in s1c and "- m-multi：未取得有效判讀：錯誤停止" in s1c, s1c)
+    check("R6 cumulative lists the packets not yet judged", f"尚未判讀的證據包：4 題：{', '.join(BANK_ORDER[2:])}" in s2c, s2c)
+    wfail = lim_ws("rep_phase1_fail")
+
+    def failing_save2(packet_dir, packet):
+        if packet["question_id"] == BANK_ORDER[5]:
+            raise OSError("disk full (simulated)")
+        return real_save_packet(packet_dir, packet)
+    gj.save_packet = failing_save2
+    clf = FakeClient([])
+    rc, log, made, asked, calls = pipe(wfail, clf, "--limit", "6", "--yes")
+    gj.save_packet = real_save_packet
+    rf = reports_in(wfail)
+    _, s1d, _ = report_parts(wfail, rf[0]) if rf else ("", "", "")
+    check("R7 phase-1 error → report still written with the error, 5 packets, 0 sent, no API",
+          rc == 2 and len(rf) == 1 and "disk full" in s1d and "實際產生證據包：5 份" in s1d and "實際送出 Gemini：0 題" in s1d
+          and not clf.calls and not made, s1d or log[-400:])
+    wcan = lim_ws("rep_cancel")
+    rc, log, made, asked, calls = pipe(wcan, FakeClient([]), "--limit", "6", confirm_fn=lambda p: False)
+    _, s1e, _ = report_parts(wcan, reports_in(wcan)[0])
+    check("R8 cancelled batch → report records the cancellation message as the stop reason",
+          rc == 2 and "停止原因：第二階段第 1/2 批停止（結束碼 2）" in s1e and "已取消" in s1e and "實際送出 Gemini：0 題" in s1e, s1e)
+    wbad = lim_ws("rep_corrupt")
+    lim_dry(wbad, "--limit", "2")
+    (wbad / "gemini_judgments.json").write_text("{broken", encoding="utf-8")
+    rc, log, made, asked, calls = pipe(wbad, FakeClient([]), "--limit", "2", "--yes")
+    check("R9 unreadable results file → refused at preflight, before any request (no report, nothing written)",
+          rc == 2 and not made and not calls and "--pipeline 安全檢查未通過" in log and not reports_in(wbad), log)
+    ctx_bad = va.Ctx(dr_bank, wbad)
+    info_bad = {"started_at": "t0", "limit": 2, "model": "m", "tier": "paid", "ready": [], "new": [], "phase2": [],
+                "stop": "x", "unprocessed": [], "rc": 2, "before": gj.pipeline_state(wbad)}
+    tb = gj.render_pipeline_report(info_bad, gj.pipeline_stats(ctx_bad, info_bad), "t1")
+    check("R9 report with unreadable results → says statistics cannot be computed (no invented numbers)",
+          "無法計算本次判讀統計" in tb and "無法計算累積統計" in tb and "| 已完成" not in tb, tb)
+
+    # ---- 統計：同一題只計一次、未知欄位不自行歸類 ----
+    order = {q: i for i, q in enumerate(BANK_ORDER)}
+    done_run = runs_of(wr)["m-multi"]["runs"][0]
+    deferred_run = {"kind": "api_call", "api_called": True, "status": "deferred", "http_status": 503, "error": "UNAVAILABLE",
+                    "evaluation": None, "final_exam_recommendation": {"source": "bank_fallback"}}
+    st = gj.summarize_judgments({"m-multi": [deferred_run, done_run],          # deferred 後成功 → 只計一次，為已完成
+                                 "m-stmt": [{"kind": "api_call"}],              # 缺 status
+                                 "m-nodoc": [{"status": "invalid_answer"}],     # 缺最終推薦 → 不歸入 fallback
+                                 "m-tactic": "garbage",                         # 紀錄不是陣列
+                                 "x-old": [{"status": "done"}]},                # 不在題庫、缺核對結果
+                                set(), order)
+    check("R10 one question counted once (deferred then done → done)", st["count"] == 5 and st["outcomes"]["done"] == 1, st["outcomes"])
+    check("R10 missing/invalid fields → unknown, not guessed", st["outcomes"]["unknown"] == 4 and st["outcomes"]["fallback"] == 0
+          and st["bank_cmp"]["無法比較"] == 4 and st["evidence_levels"]["未知"] == 4 and st["final_sources"]["未知"] == 4,
+          (st["outcomes"], st["bank_cmp"], st["evidence_levels"], st["final_sources"]))
+    check("R10 unknown questions go to review; not-in-bank listed; earlier deferred error not reported once superseded",
+          all(q in st["review"] for q in ("m-stmt", "m-nodoc", "m-tactic", "x-old")) and st["not_in_bank"] == ["x-old"]
+          and not any(e["id"] == "m-multi" for e in st["errors"]), st)
+    st2 = gj.summarize_judgments({"m-multi": [done_run, deferred_run]}, {"m-stmt"}, order)
+    check("R10 later failure keeps the earlier valid result as effective; unfinished request → review",
+          st2["outcomes"]["done"] == 1 and st2["errors"] and st2["errors"][0]["status"] == "deferred"
+          and "m-stmt" in st2["review"] and "未完成的請求" in st2["review"]["m-stmt"][-1], st2)
+finally:
+    gj.report_stamp = real_stamp
+    gj.save_packet = real_save_packet
+    va.DEFAULT_OUT = P1_BASE
 
 # ---- 全域確認 ----
 va.DEFAULT_OUT = real_default_out
