@@ -2,6 +2,7 @@ node_modules
 dist
 *.local
 .DS_Store
+.vscode/
 .env
 .env.*
 !.env.example
@@ -10,6 +11,7 @@ __pycache__/
 *.pdf
 public/data/*.drafts.json
 public/data/sc200.json
+public/data/sc200.ai.json
 public/data/*.real.json
 # Gemini 解析輸出（含真實題目內容，僅存本機）
 output/

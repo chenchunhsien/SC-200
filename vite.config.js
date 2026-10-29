@@ -1,11 +1,11 @@
 import { readdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // 與 .gitignore 對應：本機的真實題庫只透過「匯入個人題庫」使用，不能被複製進 dist
-const PRIVATE_BANK = /^(sc200\.json|.*\.real\.json|.*\.drafts\.json)$/
+const PRIVATE_BANK = /^(sc200\.json|sc200\.ai\.json|.*\.real\.json|.*\.drafts\.json)$/
 
 function excludePrivateBanks() {
   let dataDir
@@ -13,15 +13,18 @@ function excludePrivateBanks() {
     name: 'exclude-private-banks',
     apply: 'build',
     configResolved(config) {
-      dataDir = join(config.root, config.build.outDir, 'data')
+      dataDir = resolve(config.root, config.build.outDir, 'data') // outDir 可能是絕對路徑，不能用 join
     },
     closeBundle() {
+      let files
       try {
-        for (const f of readdirSync(dataDir)) {
-          if (PRIVATE_BANK.test(f)) rmSync(join(dataDir, f))
-        }
-      } catch {
-        /* 沒有 data 資料夾時略過 */
+        files = readdirSync(dataDir)
+      } catch (e) {
+        if (e.code === 'ENOENT') return // 沒有 data 資料夾時略過
+        throw e // 其他錯誤不可吞掉，否則私人題庫可能留在輸出中
+      }
+      for (const f of files) {
+        if (PRIVATE_BANK.test(f)) rmSync(join(dataDir, f))
       }
     },
   }
