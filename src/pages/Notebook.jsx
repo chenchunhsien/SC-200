@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Play, Star, Trash2, XCircle } from 'lucide-react'
 import { previewText, TYPE_LABELS } from '../lib/grading'
 import { qKey, useStore } from '../lib/store'
+import { bindSeries } from '../lib/series'
 
 export default function Notebook({ bank, onStart, initialTab = 'mistakes' }) {
   const { mistakes, starred, history, removeMistake, toggleStar } = useStore()
@@ -13,7 +14,7 @@ export default function Notebook({ bank, onStart, initialTab = 'mistakes' }) {
   const list = bank.questions.filter((q) => source[qKey(bank.id, q.id)])
 
   const practice = (questions, title) =>
-    onStart({ title, questions, mode: 'practice', source: isMistakes ? 'mistakes' : 'starred' })
+    onStart({ title, questions: bindSeries(questions, bank.questions), mode: 'practice', source: isMistakes ? 'mistakes' : 'starred' })
 
   return (
     <div className="space-y-5">

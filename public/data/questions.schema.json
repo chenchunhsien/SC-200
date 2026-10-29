@@ -58,6 +58,10 @@
         "question": { "$ref": "#/$defs/richText" },
         "code": { "type": "string", "description": "選填，題幹下方的程式碼區塊" },
         "explanation": { "$ref": "#/$defs/richText" },
+        "series": {
+          "type": "string",
+          "description": "選填，系列題代號：同一情境、各題提出不同 Solution 的題目使用相同代號，出題時會綁在一起連續出現"
+        },
         "reviewNote": {
           "type": "string",
           "description": "選填，待人工確認的備註（例如來源答案可能有誤）；作答後會在解析區以醒目樣式顯示"

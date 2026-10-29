@@ -1,30 +1,33 @@
 import { shuffle } from './grading'
 import { questionUnits } from './customBank'
+import { bindSeries, seriesBlocks } from './series'
+
+const blockUnits = (block) => block.reduce((n, q) => n + questionUnits(q), 0)
 
 /**
- * 隨機模擬測驗抽題：題數以子題計，情境題組整組抽取、不拆散。
- * 1. 將頂層題目均勻洗牌；題組與單題被抽中的機率相同，每個子題出現的機率因此一致
- * 2. 依序放入，放得下才放；放不下的題組先跳過，由後面的單題補滿
- * 3. 單題用完仍不足時，補入最小的跳過題組（允許微幅超過目標題數）
+ * 隨機模擬測驗抽題：題數以子題計，情境題組整組抽取、不拆散；系列題（series）整組抽取並連續出現。
+ * 1. 將頂層題目（系列題視為一個區塊）均勻洗牌
+ * 2. 依序放入，放得下才放；放不下的題組／系列先跳過，由後面的單題補滿
+ * 3. 單題用完仍不足時，補入最小的跳過區塊（允許微幅超過目標題數）
  * 回傳 { questions, total }；題庫不足目標題數時回傳全部題目
  */
 export function drawMockExam(questions, target) {
   const picked = []
   const skipped = []
   let total = 0
-  for (const q of shuffle(questions)) {
+  for (const block of shuffle(seriesBlocks(questions))) {
     if (total >= target) break
-    const n = questionUnits(q)
+    const n = blockUnits(block)
     if (total + n <= target) {
-      picked.push(q)
+      picked.push(...block)
       total += n
-    } else skipped.push(q)
+    } else skipped.push(block)
   }
-  skipped.sort((a, b) => questionUnits(a) - questionUnits(b))
-  for (const q of skipped) {
+  skipped.sort((a, b) => blockUnits(a) - blockUnits(b))
+  for (const block of skipped) {
     if (total >= target) break
-    picked.push(q)
-    total += questionUnits(q)
+    picked.push(...block)
+    total += blockUnits(block)
   }
   return { questions: picked, total }
 }
@@ -56,22 +59,25 @@ export function parseNumberRanges(text, max) {
 }
 
 /**
- * 依題號選題，維持題庫順序；情境題組只要有任一子題在範圍內就整組納入。
- * 回傳 { questions, total, added }，added 為因題組完整性而額外補入的子題數
+ * 依題號選題，維持題庫順序；情境題組只要有任一子題在範圍內就整組納入，
+ * 系列題只要有任一題在範圍內就整個系列納入，並連續排列。
+ * 回傳 { questions, total, added }，added 為因題組或系列完整性而額外補入的子題數
  */
 export function pickByNumbers(questions, numbers) {
   const picked = []
   let next = 1
-  let total = 0
+  let inRange = 0
   for (const q of questions) {
     const n = questionUnits(q)
     let hit = false
     for (let i = next; i < next + n && !hit; i++) hit = numbers.has(i)
     if (hit) {
       picked.push(q)
-      total += n
+      for (let i = next; i < next + n; i++) if (numbers.has(i)) inRange++
     }
     next += n
   }
-  return { questions: picked, total, added: total - numbers.size }
+  const list = bindSeries(picked, questions, { expand: true })
+  const total = list.reduce((n, q) => n + questionUnits(q), 0)
+  return { questions: list, total, added: total - inRange }
 }

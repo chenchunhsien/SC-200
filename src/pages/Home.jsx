@@ -21,9 +21,9 @@ import {
 } from 'lucide-react'
 import { qKey, useStore } from '../lib/store'
 import { formatTime } from './Quiz'
-import { shuffle } from '../lib/grading'
 import { correctUnits, countQuestions, questionUnits } from '../lib/customBank'
 import { drawMockExam, parseNumberRanges, pickByNumbers } from '../lib/mockExam'
+import { bindSeries, shuffleKeepingSeries } from '../lib/series'
 
 const MOCK_SIZES = [50, 100]
 
@@ -55,9 +55,11 @@ export default function Home({ bank, sourceInfo, onStart, onOpenNotebook, onImpo
     }
   }, [questions, bank, history, mistakes, starred])
 
+  // 系列題綁在一起連續出現：全部題目／章節／指定題號補齊整個系列；錯題、收藏只讓清單中的同系列題目相鄰
   const start = (title, list, source) => {
     if (!list.length) return
-    onStart({ title, questions: shuffled ? shuffle(list) : list, mode, source })
+    const bound = bindSeries(list, questions, { expand: ['all', 'chapter', 'range'].includes(source) })
+    onStart({ title, questions: shuffled ? shuffleKeepingSeries(bound) : bound, mode, source })
   }
 
   // 隨機模擬測驗固定使用考試模式，不受練習 / 考試切換與隨機題序影響
