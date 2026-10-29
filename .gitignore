@@ -15,3 +15,5 @@ public/data/sc200.ai.json
 public/data/*.real.json
 # Gemini 解析輸出（含真實題目內容，僅存本機）
 output/
+# 測試輸出（會複製 output/ 的真實資料）
+tests/out*/
