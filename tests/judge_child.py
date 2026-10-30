@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 os.environ["GEMINI_API_KEY"] = "FAKEKEY-child-only-0123456789abcdefghij"
-sys.path.insert(0, r"D:\SC-200-platform\scripts")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import gemini_judge as gj  # noqa: E402
 
 mode, ws, bank, baseline, log_path, hold = sys.argv[1:7]

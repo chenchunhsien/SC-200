@@ -11,7 +11,7 @@ import sys
 import urllib.error
 from pathlib import Path
 
-ROOT = Path(r"D:\SC-200-platform")
+ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__file__).parent / "out_autocollect"
 BANK = ROOT / "public/data/sc200.json"
 PROTECTED = ["public/data/sc200.json", "output/explanations.json", "output/progress.json", "output/verification.json"]

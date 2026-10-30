@@ -13,7 +13,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-PROJECT = Path(r"D:\SC-200-platform")
+PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "scripts"))
 FAKE_KEY = "FAKEKEY-test-only-0123456789abcdefghijklmnop"
 os.environ["GEMINI_API_KEY"] = FAKE_KEY  # 讓 load_api_key 使用假金鑰，不讀真實 .env

@@ -14,7 +14,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-PROJECT = Path(r"D:\SC-200-platform")
+PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "scripts"))
 import audit_judge_progress as ap  # noqa: E402
 

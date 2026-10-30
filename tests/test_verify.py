@@ -8,7 +8,7 @@ import shutil
 import sys
 from pathlib import Path
 
-ROOT = Path(r"D:\SC-200-platform")
+ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__file__).parent / "out_verify"
 BANK = ROOT / "public/data/sc200.json"
 REAL = {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest()

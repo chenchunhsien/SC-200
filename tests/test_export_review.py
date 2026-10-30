@@ -13,7 +13,7 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-PROJECT = Path(r"D:\SC-200-platform")
+PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "scripts"))
 import export_review_list as erl  # noqa: E402
 
@@ -243,6 +243,22 @@ check("E7 unmappable id kept and flagged, not filled in", "e-ghost" in q2 and q2
       and any("不在目前正式題庫" in f for f in q2["e-ghost"]["flags"]) and q2["e-ghost"]["categories"] == ["other"]
       and q2["e-ghost"]["question"] is None, q2.get("e-ghost"))
 check("E7 data-only question flagged as missing from the report", any("報告未列出此題" in f for f in q2["e-conf"]["flags"]))
+
+# ---- 沒有 pipeline 報告（以 --ids 分批判讀）：照常匯出，不比對、不標記報告差異 ----
+out3 = root / "export_noreport"
+rc, log = run_main(["--bank", str(bank), "--workspace", str(ws), "--out", str(out3)])
+d3 = json.loads((out3 / "review_list.json").read_text(encoding="utf-8"))
+q3 = {q["id"]: q for q in d3["questions"]}
+d1 = json.loads((out / "review_list.json").read_text(encoding="utf-8"))
+q1 = {q["id"]: q for q in d1["questions"]}
+check("E8 no --report: same questions and categories as the report-backed export",
+      rc == 0 and set(q3) == set(q1) and all(q3[q]["categories"] == q1[q]["categories"] for q in q1), sorted(q3))
+check("E8 no --report: meta.report is null and checks say not compared",
+      d3["meta"]["report"] is None and "未提供 pipeline 報告" in d3["meta"]["checks"][0], d3["meta"])
+check("E8 no --report: no report-difference flags",
+      not any("報告" in f for r in d3["questions"] for f in r["flags"]), [r["flags"] for r in d3["questions"]])
+check("E8 no --report: markdown header says no report",
+      "（無，未與 pipeline 報告比對）" in (out3 / "review_list.md").read_text(encoding="utf-8"))
 
 # ---------------------------------------------------------------------------
 # 3. 單一函式

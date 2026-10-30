@@ -173,7 +173,7 @@ def build_record(qid: str, runs, ctx, packet_dir: Path, reasons: list[str]) -> d
 
 def render_md(recs: list[dict], meta: dict) -> str:
     L = ["# SC-200 Gemini 判讀：人工複核工作清單", "",
-         f"> 產生時間 {meta['generated_at']}｜工作區 `{meta['workspace']}`｜依據報告 `{meta['report']}`",
+         f"> 產生時間 {meta['generated_at']}｜工作區 `{meta['workspace']}`｜依據報告 " + (f"`{meta['report']}`" if meta["report"] else "（無，未與 pipeline 報告比對）"),
          "> 唯讀匯出，未呼叫任何 API、未修改題庫或判讀紀錄。**Gemini 建議不是經過獨立驗證的正確答案**；"
          "官方證據等級描述證據品質（程式計算），不是正確率。有效引句只代表引文確實存在於證據包段落中。", "",
          "## 對應檢查", ""]
@@ -265,7 +265,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bank", type=Path, default=va.DEFAULT_BANK)
     ap.add_argument("--workspace", type=Path, required=True)
-    ap.add_argument("--report", type=Path, required=True, help="pipeline_summary_*.md（比對其待人工複核清單）")
+    ap.add_argument("--report", type=Path, default=None,
+                    help="pipeline_summary_*.md（比對其待人工複核清單）；以 --ids 分批判讀、沒有 pipeline 報告時可省略")
     ap.add_argument("--out", type=Path, default=None, help="新的輸出目錄（預設 output/gemini_review_<時間>；已存在即拒絕）")
     args = ap.parse_args(argv)
     ws = args.workspace.resolve()
@@ -275,7 +276,7 @@ def main(argv=None) -> int:
         return 2
     ctx = va.Ctx(args.bank.resolve(), ws)
     results = gj.load_results(ws / "gemini_judgments.json")
-    rep = parse_report(args.report.read_text(encoding="utf-8"))
+    rep = parse_report(args.report.read_text(encoding="utf-8")) if args.report else None
     order = {q: i for i, q in enumerate(ctx.units)}
     runs_all = {q: v.get("runs") for q, v in results["questions"].items() if isinstance(v, dict) and v.get("runs")}
     unfinished = {u["question_id"] for u in gj.unfinished_attempts(ws, results) if u.get("question_id")}
@@ -283,16 +284,23 @@ def main(argv=None) -> int:
 
     # 對應檢查：報告宣告數、報告列出的題號與原因、目前資料重新計算的結果、正式題庫
     checks = []
-    rep_ids, cur_ids = list(rep["review"]), list(stats["review"])
-    checks.append(f"報告宣告待人工複核 {rep['declared']} 題；報告實際列出 {len(rep_ids)} 題；依目前判讀紀錄重新計算 {len(cur_ids)} 題")
-    only_rep, only_cur = sorted(set(rep_ids) - set(cur_ids)), sorted(set(cur_ids) - set(rep_ids))
-    checks.append("報告與目前資料的題號：" + ("完全一致" if not only_rep and not only_cur else
-                  f"僅報告有 {only_rep or '無'}；僅目前資料有 {only_cur or '無'}"))
-    reason_diff = [q for q in rep_ids if q in stats["review"] and rep["review"][q] != stats["review"][q]]
-    checks.append("各題複核原因：" + ("與報告一致" if not reason_diff else f"與報告不同 {len(reason_diff)} 題：{', '.join(reason_diff)}"))
+    cur_ids = list(stats["review"])
     out_now = {gj.OUTCOMES[k]: stats["outcomes"].get(k, 0) for k in gj.OUTCOMES}
-    out_diff = {k: (rep["outcomes"].get(k), v) for k, v in out_now.items() if rep["outcomes"].get(k) != v}
-    checks.append("累積結果統計：" + ("與報告一致" if not out_diff else f"與報告不同（報告值, 目前值）：{out_diff}"))
+    if rep is None:
+        rep = {"review": {}}
+        rep_ids, only_rep, only_cur = [], [], []
+        checks.append(f"未提供 pipeline 報告，未與報告比對；依目前判讀紀錄計算待人工複核 {len(cur_ids)} 題")
+        checks.append(f"累積結果統計：{out_now}")
+    else:
+        rep_ids = list(rep["review"])
+        checks.append(f"報告宣告待人工複核 {rep['declared']} 題；報告實際列出 {len(rep_ids)} 題；依目前判讀紀錄重新計算 {len(cur_ids)} 題")
+        only_rep, only_cur = sorted(set(rep_ids) - set(cur_ids)), sorted(set(cur_ids) - set(rep_ids))
+        checks.append("報告與目前資料的題號：" + ("完全一致" if not only_rep and not only_cur else
+                      f"僅報告有 {only_rep or '無'}；僅目前資料有 {only_cur or '無'}"))
+        reason_diff = [q for q in rep_ids if q in stats["review"] and rep["review"][q] != stats["review"][q]]
+        checks.append("各題複核原因：" + ("與報告一致" if not reason_diff else f"與報告不同 {len(reason_diff)} 題：{', '.join(reason_diff)}"))
+        out_diff = {k: (rep["outcomes"].get(k), v) for k, v in out_now.items() if rep["outcomes"].get(k) != v}
+        checks.append("累積結果統計：" + ("與報告一致" if not out_diff else f"與報告不同（報告值, 目前值）：{out_diff}"))
     not_in_bank = [q for q in set(rep_ids) | set(cur_ids) if q not in ctx.units]
     checks.append("對應正式題庫：" + ("全部題號都在 public/data/sc200.json 中" if not not_in_bank else f"題庫中找不到 {not_in_bank}"))
     checks.append(f"判讀紀錄共 {len(runs_all)} 題、正式題庫共 {len(ctx.units)} 個判讀單位；未完成請求 {len(unfinished)} 題")
@@ -311,7 +319,8 @@ def main(argv=None) -> int:
         primary[r["categories"][0]] = primary.get(r["categories"][0], 0) + 1
         for c in r["categories"]:
             any_count[c] = any_count.get(c, 0) + 1
-    meta = {"generated_at": va.now_iso(), "workspace": str(ws), "report": str(args.report), "checks": checks,
+    meta = {"generated_at": va.now_iso(), "workspace": str(ws), "report": str(args.report) if args.report else None,
+            "checks": checks,
             "category_any": any_count, "category_primary": primary, "flagged": sum(1 for r in recs if r["flags"])}
 
     gj.write_new_file(out / "review_list.md", render_md(recs, meta) + "\n")

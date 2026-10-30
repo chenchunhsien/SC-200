@@ -16,7 +16,7 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-PROJECT = Path(r"D:\SC-200-platform")
+PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "scripts"))
 import build_ai_bank as bab  # noqa: E402
 
@@ -293,6 +293,44 @@ check("B11 source bank, results, packets and review list unchanged",
 check("B11 aiBuild records source hashes", out["aiBuild"]["sourceBankSha256"] == src_before["bank"]
       and out["aiBuild"]["resultsSha256"] == sha(ws / "gemini_judgments.json"))
 
+# ---- 多個工作區：判讀紀錄依題號合併，複核清單取聯集，同一題重複即停止 ----
+all_results = json.loads((ws / "gemini_judgments.json").read_text(encoding="utf-8"))
+qids = sorted(all_results["questions"])
+
+
+def split_ws(name, ids):
+    w = root / name
+    shutil.copytree(ws / "gemini_judge", w / "gemini_judge")
+    (w / "gemini_judgments.json").write_text(json.dumps(
+        {"meta": {}, "questions": {q: all_results["questions"][q] for q in ids}}, ensure_ascii=False), encoding="utf-8")
+    return w
+
+
+ws_a, ws_b = split_ws("ws_a", qids[::2]), split_ws("ws_b", qids[1::2])
+review_b = root / "review_b.json"
+review_b.write_text(json.dumps({"meta": {}, "questions": [{"id": "t-multi"}]}), encoding="utf-8")
+multi_path = root / "public" / "sc200.ai.multi.json"
+rc, log = run_main(["--bank", str(bank_path), "--workspace", str(ws_a), "--workspace", str(ws_b),
+                    "--review", str(review), "--review", str(review_b), "--out", str(multi_path)])
+check("B12 two workspaces build succeeds", rc == 0 and multi_path.is_file(), log)
+multi = json.loads(multi_path.read_text(encoding="utf-8"))
+MU = {u["id"]: u for u in bab.answerable(multi["questions"])}
+same = {k: (MU[k]["answer"] if "answer" in MU[k] else None, {**MU[k]["ai"], "reviewStatus": None})
+        == (U[k]["answer"] if "answer" in U[k] else None, {**U[k]["ai"], "reviewStatus": None}) for k in U}
+check("B12 merged result identical to the single-workspace build (answers and ai)", all(same.values()),
+      [k for k, v in same.items() if not v])
+check("B12 review lists are unioned", MU["t-multi"]["ai"]["reviewStatus"] == bab.REVIEW_PENDING
+      and MU["t-differ"]["ai"]["reviewStatus"] == bab.REVIEW_PENDING and U["t-multi"]["ai"]["reviewStatus"] == bab.REVIEW_NONE)
+check("B12 aiBuild lists both sources, no single-workspace hash",
+      [s["workspace"] for s in multi["aiBuild"]["sources"]] == ["ws_a", "ws_b"]
+      and sum(s["questions"] for s in multi["aiBuild"]["sources"]) == len(qids)
+      and "resultsSha256" not in multi["aiBuild"] and len(multi["aiBuild"]["reviewListSha256s"]) == 2, multi["aiBuild"])
+ws_dup = split_ws("ws_dup", [qids[0]])
+dup_path = root / "public" / "sc200.ai.dup.json"
+rc, log = run_main(["--bank", str(bank_path), "--workspace", str(ws_a), "--workspace", str(ws_dup),
+                    "--review", str(review), "--out", str(dup_path)])
+check("B12 same question in two workspaces → stop, nothing written", rc == 2 and "多個工作區" in log and not dup_path.exists(), log)
+
 # ---------------------------------------------------------------------------
 # 2. Git 與部署清單
 # ---------------------------------------------------------------------------
@@ -365,33 +403,40 @@ else:
 # ---------------------------------------------------------------------------
 # 4. 真實資料（唯讀）：輸出寫到暫存目錄
 # ---------------------------------------------------------------------------
-REAL_WS = PROJECT / "output" / "gemini_run_434"
-REAL_REVIEW = PROJECT / "output" / "gemini_review_20261029_092437" / "review_list.json"
-if REAL_REVIEW.is_file() and (REAL_WS / "gemini_judgments.json").is_file():
-    real_before = {"bank": sha(va.DEFAULT_BANK), "results": sha(REAL_WS / "gemini_judgments.json"),
-                   "packets": tree(REAL_WS / "gemini_judge"), "review": sha(REAL_REVIEW)}
+# 舊題庫 434 題的工作區，加上 2026-10-30 併入的 44 題新題工作區（以 --ids 分批判讀，複核清單不帶 pipeline 報告）
+REAL = [(PROJECT / "output" / "gemini_run_434", PROJECT / "output" / "gemini_review_20261029_092437" / "review_list.json"),
+        (PROJECT / "output" / "gemini_run_new44", PROJECT / "output" / "gemini_review_new44" / "review_list.json")]
+
+
+def real_sources():
+    return {"bank": sha(va.DEFAULT_BANK)} | {
+        ws.name: (sha(ws / "gemini_judgments.json"), tree(ws / "gemini_judge"), sha(rv)) for ws, rv in REAL}
+
+
+if all(rv.is_file() and (ws / "gemini_judgments.json").is_file() for ws, rv in REAL):
+    real_before = real_sources()
     real_out = TMP / "real" / "sc200.ai.json"
-    rc, log = run_main(["--workspace", str(REAL_WS), "--review", str(REAL_REVIEW), "--out", str(real_out)])
+    argv = [a for ws, _ in REAL for a in ("--workspace", str(ws))] + [a for _, rv in REAL for a in ("--review", str(rv))]
+    rc, log = run_main(argv + ["--out", str(real_out)])
     ro = json.loads(real_out.read_text(encoding="utf-8"))
     RU = {u["id"]: u for u in bab.answerable(ro["questions"])}
     st = {}
     for u in RU.values():
         st[u["ai"]["answerStatus"]] = st.get(u["ai"]["answerStatus"], 0) + 1
     valid = sum(st.get(k, 0) for k in ("agree", "differ", "invalid_spec", "stale"))
-    check("R1 real: 434 answerable, 418 valid judgments, 16 without a valid one",
-          rc == 0 and len(RU) == 434 and valid == 418 and st.get("deferred", 0) + st.get("fallback", 0) + st.get("community", 0) == 16, st)
+    check("R1 real: 478 answerable, 462 valid judgments (418 + 44 new), 16 without a valid one",
+          rc == 0 and len(RU) == 478 and valid == 462 and st.get("deferred", 0) + st.get("fallback", 0) + st.get("community", 0) == 16, st)
     check("R1 real: qd7-qs1-q028 rejected by the generic step-count rule, original b,f,c kept",
           RU["qd7-qs1-q028"]["ai"]["answerStatus"] == "invalid_spec" and RU["qd7-qs1-q028"]["answer"] == ["b", "f", "c"], RU["qd7-qs1-q028"]["ai"])
-    check("R1 real: review status 70 待複核", sum(1 for u in RU.values() if u["ai"]["reviewStatus"] == "待複核") == 70)
+    check("R1 real: review status 76 待複核 (70 + 6 new)", sum(1 for u in RU.values() if u["ai"]["reviewStatus"] == "待複核") == 76)
     check("R1 real: no unknown/unavailable/basis_missing/stale", not {"unavailable", "basis_missing", "stale"} & set(st), st)
-    check("R2 real sources unchanged", real_before == {"bank": sha(va.DEFAULT_BANK), "results": sha(REAL_WS / "gemini_judgments.json"),
-                                                       "packets": tree(REAL_WS / "gemini_judge"), "review": sha(REAL_REVIEW)})
+    check("R2 real sources unchanged", real_before == real_sources())
     if NODE:
         rn = node_check(real_out)
         check("R3 real AI bank: frontend validateBank 0 errors, every practice answer grades correct",
-              rn.get("errors") == [] and rn.get("practiceFull") == rn.get("units") == 434 and rn.get("caseFull") is True, rn)
+              rn.get("errors") == [] and rn.get("practiceFull") == rn.get("units") == 478 and rn.get("caseFull") is True, rn)
 else:
-    print("NOTE real-data checks skipped: real workspace or review list not present")
+    print("NOTE real-data checks skipped: real workspaces or review lists not present")
 
 check("zero network attempts", not NET_ATTEMPTS, NET_ATTEMPTS)
 print(f"{len(PASSED)}/{len(PASSED) + len(FAILED)} passed")

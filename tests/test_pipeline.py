@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(r"D:\SC-200-platform")
+ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(__file__).parent / "out"
 FAKE_KEY = "FAKE-KEY-should-never-appear-123"
 IDS = "qd1-t1-q1,qd1-qs4-q004,qd1-qs4-q007,qd1-qs4-q006,qd1-qs4-q044"

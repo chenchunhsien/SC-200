@@ -15,6 +15,9 @@
 
     python scripts/build_ai_bank.py --workspace output/gemini_run_434 \\
         --review output/gemini_review_20261029_092437/review_list.json --out public/data/sc200.ai.json
+
+--workspace／--review 可重複指定（例如舊題庫的工作區加上新題目的工作區）：判讀紀錄依題號合併，
+同一題出現在多個工作區即停止；複核清單取聯集。
 """
 from __future__ import annotations
 
@@ -242,7 +245,8 @@ class SimpleUnit:
         self.question, self.type = q, q["type"]
 
 
-def build(ctx, results: dict, packet_dir: Path, review_ids: set) -> tuple[dict, dict]:
+def build(ctx, results: dict, packet_dirs: dict, review_ids: set) -> tuple[dict, dict]:
+    """packet_dirs：題號 → 該題判讀紀錄所在工作區的證據包目錄。"""
     out = copy.deepcopy(ctx.bank)
     out.update(id=BANK_ID, title=f"{ctx.bank.get('title', 'SC-200')}（AI 判讀版）",
                description="練習答案優先採用有效的 Gemini 判讀（AI 判讀，未經獨立驗證）；原題庫答案保存於 originalAnswer。")
@@ -251,7 +255,8 @@ def build(ctx, results: dict, packet_dir: Path, review_ids: set) -> tuple[dict, 
     for q in answerable(out["questions"]):
         unit = ctx.units[q["id"]]
         orig = original_answer(q, unit.type)
-        info, practice = ai_info(unit, (results["questions"].get(q["id"]) or {}).get("runs"), packet_dir, review_ids)
+        info, practice = ai_info(unit, (results["questions"].get(q["id"]) or {}).get("runs"),
+                                 packet_dirs.get(q["id"]), review_ids)
         q["originalAnswer"] = orig
         q["ai"] = info
         if practice is not None:
@@ -266,28 +271,47 @@ def main(argv=None) -> int:
     eq.setup_console()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bank", type=Path, default=va.DEFAULT_BANK)
-    ap.add_argument("--workspace", type=Path, required=True)
-    ap.add_argument("--review", type=Path, required=True, help="export_review_list.py 產生的 review_list.json")
+    ap.add_argument("--workspace", type=Path, action="append", required=True,
+                    help="判讀工作區；可重複指定，同一題只能出現在一個工作區")
+    ap.add_argument("--review", type=Path, action="append", required=True,
+                    help="export_review_list.py 產生的 review_list.json；可重複指定，題號取聯集")
     ap.add_argument("--out", type=Path, default=va.DEFAULT_BANK.with_name("sc200.ai.json"))
     args = ap.parse_args(argv)
     out_path = args.out.resolve()
     if out_path.exists():
         print(f"輸出檔已存在，停止，不覆寫：{out_path}")
         return 2
-    ws = args.workspace.resolve()
-    ctx = va.Ctx(args.bank.resolve(), ws)
-    results = gj.load_results(ws / "gemini_judgments.json")
-    review = json.loads(args.review.read_text(encoding="utf-8"))
-    review_ids = {q["id"] for q in review.get("questions") or [] if isinstance(q, dict) and q.get("id")}
+    workspaces = [w.resolve() for w in args.workspace]
+    ctx = va.Ctx(args.bank.resolve(), workspaces[0])
+    # 合併各工作區的判讀紀錄；同一題出現在多個工作區時無法判斷該採用哪一份，停止
+    results, packet_dirs, owner, sources = {"questions": {}}, {}, {}, []
+    for ws in workspaces:
+        ws_results = gj.load_results(ws / "gemini_judgments.json")
+        ws_ids = [i for i, r in ws_results["questions"].items() if (r or {}).get("runs")]
+        dup = sorted(i for i in ws_ids if i in owner)
+        if dup:
+            print(f"同一題出現在多個工作區，停止：{dup[:10]}（{owner[dup[0]]} 與 {ws}）")
+            return 2
+        for i in ws_ids:
+            results["questions"][i] = ws_results["questions"][i]
+            packet_dirs[i], owner[i] = ws / "gemini_judge" / "packets", ws
+        sources.append({"workspace": ws.name, "resultsSha256": eq.sha256_file(ws / "gemini_judgments.json"),
+                        "questions": len(ws_ids)})
+    review_ids = set()
+    for path in args.review:
+        review = json.loads(path.read_text(encoding="utf-8"))
+        review_ids |= {q["id"] for q in review.get("questions") or [] if isinstance(q, dict) and q.get("id")}
     unknown_review = sorted(review_ids - set(ctx.units))
     if unknown_review:
         print(f"複核清單中有題庫找不到的題號，停止：{unknown_review}")
         return 2
-    out, summary = build(ctx, results, ws / "gemini_judge" / "packets", review_ids)
+    out, summary = build(ctx, results, packet_dirs, review_ids)
     out["aiBuild"] = {"rulesVersion": RULES_VERSION, "generatedAt": va.now_iso(), "sourceBankSha256": ctx.bank_sha,
-                      "resultsSha256": eq.sha256_file(ws / "gemini_judgments.json"),
-                      "reviewListSha256": eq.sha256_file(args.review), "answerStatusCounts": summary["counts"],
+                      "sources": sources, "reviewListSha256s": [eq.sha256_file(p) for p in args.review],
+                      "answerStatusCounts": summary["counts"],
                       "note": "AI 判讀，未經獨立驗證；練習答案依 ai.practiceSource，原題庫答案見 originalAnswer"}
+    if len(workspaces) == 1:  # 單一工作區時保留原本的欄位
+        out["aiBuild"].update(resultsSha256=sources[0]["resultsSha256"], reviewListSha256=eq.sha256_file(args.review[0]))
     problems = validate_output(ctx.bank, out, len(ctx.units))
     if problems:
         print("輸出驗證未通過，未寫入：\n  " + "\n  ".join(problems[:20]))
