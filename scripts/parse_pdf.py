@@ -86,10 +86,13 @@ TODO = "TODO"
 # ---------------------------------------------------------------------------
 
 
-def extract_lines(pdf: Path, first: int | None, last: int | None, header_ratio: float) -> tuple[list[str], dict[int, bool]]:
+def extract_lines(pdf: Path, first: int | None, last: int | None, header_ratio: float,
+                  sort: bool = True) -> tuple[list[str], dict[int, bool]]:
     """回傳全文行陣列（插入頁碼標記）與每頁是否含圖片。
 
     出現在超過 header_ratio 比例頁面上的短行會被視為頁首 / 頁尾並移除。
+    sort=False 依 PDF 內容順序擷取：頁面有疊在內文上的浮水印時，排序會把浮水印與同一列的內文
+    （例如 "QUESTION 50"）黏成一行，導致題目無法辨識；不排序時浮水印自成一行，可由頁首/頁尾規則移除。
     """
     doc = fitz.open(pdf)
     start = max(1, first or 1)
@@ -98,7 +101,7 @@ def extract_lines(pdf: Path, first: int | None, last: int | None, header_ratio: 
     has_images: dict[int, bool] = {}
     for no in range(start, end + 1):
         page = doc[no - 1]
-        text = page.get_text("text", sort=True)
+        text = page.get_text("text", sort=sort)
         lines = [ln.rstrip() for ln in text.replace(" ", " ").splitlines()]
         pages.append((no, lines))
         has_images[no] = bool(page.get_images(full=False))
@@ -637,7 +640,7 @@ def write_json(path: Path, data) -> None:
 
 def cmd_parse(args) -> None:
     pdf = Path(args.pdf)
-    lines, has_images = extract_lines(pdf, args.first_page, args.last_page, args.header_ratio)
+    lines, has_images = extract_lines(pdf, args.first_page, args.last_page, args.header_ratio, sort=not args.no_sort)
     if args.dump_text:
         Path(args.dump_text).write_text("\n".join(lines), encoding="utf-8")
         print(f"已輸出擷取文字：{args.dump_text}")
@@ -757,6 +760,8 @@ def main() -> None:
     p.add_argument("--last-page", type=int, help="結束頁")
     p.add_argument("--header-ratio", type=float, default=0.5, help="出現於此比例以上頁面的行視為頁首/頁尾（預設 0.5）")
     p.add_argument("--loose-options", action="store_true", help="允許沒有標點的選項格式，例如 'A text'")
+    p.add_argument("--no-sort", action="store_true",
+                   help="依 PDF 內容順序擷取文字（頁面有浮水印、題號被黏進其他行時使用）")
     p.add_argument("--snapshots", help="將 draft 題目所在頁面輸出為 PNG 的目錄")
     p.add_argument("--dpi", type=int, default=110, help="截圖解析度（預設 110）")
     p.add_argument("--dump-text", help="另存擷取後的純文字，方便除錯正規表示式")
